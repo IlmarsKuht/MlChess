@@ -1,0 +1,26 @@
+# Build output
+/target
+**/target
+
+# Rust tooling backups
+**/*.rs.bk
+
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+*.swo
+*~
+
+# Editors/IDEs
+/.vscode/
+/.idea/
+/.vs/
+**/.vscode/
+**/.idea/
+**/.vs/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
