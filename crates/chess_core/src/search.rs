@@ -1,6 +1,6 @@
 use crate::{board::Position, eval::evaluate, movegen::legal_moves_into, types::Move};
 
-pub fn pick_best_move(pos: &Position, depth: u8) -> Option<Move> {
+pub fn pick_best_move(pos: &Position, depth: u8) -> Option<(Move, i32)> {
     let mut tmp = pos.clone();
     let mut moves = Vec::with_capacity(64);
     legal_moves_into(&mut tmp, &mut moves);
@@ -26,7 +26,7 @@ pub fn pick_best_move(pos: &Position, depth: u8) -> Option<Move> {
             best = mv;
         }
     }
-    Some(best)
+    Some((best, best_score))
 }
 
 fn negamax(pos: &mut Position, depth: u8, mut alpha: i32, beta: i32) -> i32 {

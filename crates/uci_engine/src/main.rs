@@ -54,9 +54,38 @@ fn main() {
                 set_position_from_uci(&mut pos, &parts[1..]);
             }
             "go" => {
-                // We ignore time controls for now and just search fixed depth
-                let best = pick_best_move(&pos, depth);
-                if let Some(mv) = best {
+                // Parse optional depth override: "go depth X"; default to current depth
+                let mut search_depth = depth;
+                if let Some(idx) = parts.iter().position(|&x| x.eq_ignore_ascii_case("depth")) {
+                    if idx + 1 < parts.len() {
+                        if let Ok(d) = parts[idx + 1].parse::<u8>() {
+                            search_depth = d.clamp(1, 8);
+                        }
+                    }
+                }
+
+                // Iterative deepening: emit one info line per depth so UIs can plot eval history
+                let mut final_mv = None;
+                for d in 1..=search_depth {
+                    if let Some((mv, score)) = pick_best_move(&pos, d) {
+                        final_mv = Some(mv);
+                        writeln!(
+                            stdout,
+                            "info depth {} score cp {} pv {}",
+                            d,
+                            score,
+                            move_to_uci(mv)
+                        )
+                        .ok();
+                        stdout.flush().ok();
+                    } else {
+                        // No legal moves; stop searching deeper
+                        break;
+                    }
+                }
+
+                if let Some(mv) = final_mv {
+                    // Final bestmove uses deepest completed iteration
                     writeln!(stdout, "bestmove {}", move_to_uci(mv)).ok();
                 } else {
                     writeln!(stdout, "bestmove 0000").ok(); // no moves

@@ -20,6 +20,7 @@ Developer workflows / useful commands
 - Run perft tests only (integration test file at `crates/chess_core/tests/perft_tests.rs`):
   - `cargo test -p chess_core --test perft_tests`
 - Run the UCI engine (interactive): `cargo run -p uci_engine` (add `--release` for optimized binary).
+- Manual GUI testing: point Cute Chess UI at the `uci_engine` binary (e.g., `target/release/uci_engine.exe`) via UCI; keep an eye on `info` search outputs for eval history.
 - Incremental build artifacts and compiled crates appear under `target/`.
 
 Project-specific patterns & conventions
