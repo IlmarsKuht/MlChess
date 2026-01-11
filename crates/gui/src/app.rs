@@ -9,8 +9,8 @@ use chess_core::{Color, Engine, Move};
 use classical_engine::ClassicalEngine;
 use iced::time;
 use iced::widget::{
-    button, column, container, horizontal_rule, pick_list, row, scrollable, slider,
-    text, text_input, vertical_space,
+    button, column, container, horizontal_rule, pick_list, row, scrollable, slider, text,
+    text_input, vertical_space,
 };
 use iced::{Element, Length, Subscription, Task, Theme};
 use ml_engine::NeuralEngine;
@@ -215,7 +215,7 @@ impl ChessApp {
                     && !self.game.engine_thinking
                 {
                     self.game.select_square(sq);
-                    
+
                     // Check if we need to trigger engine move
                     return self.maybe_trigger_engine_move();
                 }
@@ -230,12 +230,12 @@ impl ChessApp {
                 };
                 self.game = GameState::with_time_control(time_control);
                 self.engine_task_running = false;
-                
+
                 // Start the clock for the first player if not unlimited
                 if self.game.clock.enabled {
                     self.game.clock.start(Color::White);
                 }
-                
+
                 self.maybe_trigger_engine_move()
             }
 
@@ -282,7 +282,7 @@ impl ChessApp {
                 self.game.engine_thinking = false;
                 self.engine_task_running = false;
                 self.game.set_evaluation(eval);
-                
+
                 if self.game.result == GameResult::InProgress {
                     self.game.apply_move(mv);
                     // Check if next player is also an engine
@@ -328,6 +328,7 @@ impl ChessApp {
         let position = self.game.position.clone();
         let depth = self.engine_depth;
         let player_type = current_player.clone();
+        let side_to_move = self.game.position.side_to_move;
 
         Task::perform(
             async move {
@@ -338,9 +339,15 @@ impl ChessApp {
                         PlayerType::Neural => Box::new(NeuralEngine::new()),
                         PlayerType::Human => unreachable!(),
                     };
-                    
+
                     let result = engine.search(&position, depth);
-                    (result.best_move, result.score)
+                    // Convert score to white's perspective (engine returns from side-to-move's view)
+                    let score_from_white = if side_to_move == Color::White {
+                        result.score
+                    } else {
+                        -result.score
+                    };
+                    (result.best_move, score_from_white)
                 })
                 .await
                 .ok()
@@ -401,16 +408,12 @@ impl ChessApp {
 
         let content: Element<'_, Message> = match self.tab {
             Tab::Play => self.play_view(),
-            Tab::Tournament => tournament_view::tournament_view(&self.tournament)
-                .map(Message::Tournament),
+            Tab::Tournament => {
+                tournament_view::tournament_view(&self.tournament).map(Message::Tournament)
+            }
         };
 
-        column![
-            tabs,
-            horizontal_rule(2),
-            content,
-        ]
-        .into()
+        column![tabs, horizontal_rule(2), content,].into()
     }
 
     /// Render the play/game view
@@ -445,7 +448,7 @@ impl ChessApp {
         // +1000cp = 100% white, -1000cp = 100% black
         let eval = self.game.evaluation as f32;
         let white_percent = ((eval / 1000.0 + 1.0) / 2.0).clamp(0.05, 0.95);
-        
+
         let board_height = SQUARE_SIZE * 8.0;
         let white_height = board_height * white_percent;
         let black_height = board_height * (1.0 - white_percent);
@@ -458,9 +461,20 @@ impl ChessApp {
         };
 
         let eval_text = if self.game.evaluation.abs() > 900 {
-            if self.game.evaluation > 0 { "M".to_string() } else { "-M".to_string() }
+            if self.game.evaluation > 0 {
+                "M".to_string()
+            } else {
+                "-M".to_string()
+            }
         } else {
             format!("{:.1}", self.game.evaluation as f32 / 100.0)
+        };
+
+        // Text color should contrast with bottom_color
+        let text_color = if bottom_color == EVAL_WHITE {
+            EVAL_BLACK
+        } else {
+            EVAL_WHITE
         };
 
         column![
@@ -471,11 +485,7 @@ impl ChessApp {
                     background: Some(iced::Background::Color(top_color)),
                     ..Default::default()
                 }),
-            container(
-                text(eval_text)
-                    .size(10)
-                    .color(if self.game.evaluation > 0 { EVAL_BLACK } else { EVAL_WHITE })
-            )
+            container(text(eval_text).size(10).color(text_color))
                 .width(EVAL_BAR_WIDTH)
                 .height(bottom_height)
                 .center_x(Length::Fill)
@@ -491,7 +501,7 @@ impl ChessApp {
     fn render_clock(&self, color: Color, label: &'static str) -> Element<'static, Message> {
         let remaining = self.game.clock.remaining_time(color);
         let time_str = ChessClock::format_time(remaining);
-        
+
         let is_active = self.game.clock.running_for == Some(color);
         let is_low = remaining.as_secs() < 30;
 
@@ -506,11 +516,8 @@ impl ChessApp {
         };
 
         container(
-            column![
-                text(label).size(12),
-                text(time_str).size(24),
-            ]
-            .align_x(iced::Alignment::Center)
+            column![text(label).size(12), text(time_str).size(24),]
+                .align_x(iced::Alignment::Center),
         )
         .width(Length::Fill)
         .padding(10)
@@ -527,11 +534,7 @@ impl ChessApp {
 
     /// Render the control panel
     fn control_panel(&self) -> Element<'_, Message> {
-        let player_types = vec![
-            PlayerType::Human,
-            PlayerType::Classical,
-            PlayerType::Neural,
-        ];
+        let player_types = vec![PlayerType::Human, PlayerType::Classical, PlayerType::Neural];
 
         let time_presets = vec![
             TimePreset::Bullet1_0,
@@ -621,8 +624,7 @@ impl ChessApp {
         // Depth slider
         let depth_slider = row![
             text(format!("Depth: {}", self.engine_depth)).size(14),
-            slider(1..=10, self.engine_depth, Message::DepthChanged)
-                .width(Length::Fill),
+            slider(1..=10, self.engine_depth, Message::DepthChanged).width(Length::Fill),
         ]
         .spacing(10);
 
@@ -650,19 +652,17 @@ impl ChessApp {
         // Move history
         let moves_title = text("Moves").size(16);
         let mut moves_list = column![].spacing(2);
-        
+
         for (i, chunk) in self.game.moves.chunks(2).enumerate() {
             let move_num = i + 1;
             let white_move = &chunk[0].san;
             let black_move = chunk.get(1).map(|m| m.san.as_str()).unwrap_or("");
-            
-            moves_list = moves_list.push(
-                text(format!("{}. {} {}", move_num, white_move, black_move)).size(13)
-            );
+
+            moves_list = moves_list
+                .push(text(format!("{}. {} {}", move_num, white_move, black_move)).size(13));
         }
 
-        let moves_scroll = scrollable(moves_list)
-            .height(Length::Fill);
+        let moves_scroll = scrollable(moves_list).height(Length::Fill);
 
         let status_text = text(status).size(14);
 
@@ -702,7 +702,7 @@ impl ChessApp {
 /// Create a tab button
 fn tab_button(label: &str, tab: Tab, current: Tab) -> Element<'static, Message> {
     let is_active = tab == current;
-    
+
     button(text(label.to_string()))
         .on_press(Message::TabSelected(tab))
         .style(if is_active {
