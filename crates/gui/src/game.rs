@@ -1,7 +1,8 @@
-//! Game state management
+//! Game state management with clock support
 
 use chess_core::{legal_moves_into, Color, Move, PieceKind, Position};
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 /// Represents the current state of a chess game
 #[derive(Debug, Clone)]
@@ -20,6 +21,10 @@ pub struct GameState {
     pub result: GameResult,
     /// Is engine thinking?
     pub engine_thinking: bool,
+    /// Clock state
+    pub clock: ChessClock,
+    /// Current evaluation (in centipawns, positive = white advantage)
+    pub evaluation: i32,
 }
 
 /// A recorded move with SAN notation
@@ -36,6 +41,163 @@ pub enum GameResult {
     WhiteWins,
     BlackWins,
     Draw,
+    WhiteTimeout,
+    BlackTimeout,
+}
+
+/// Time control settings
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeControl {
+    /// Initial time in seconds
+    pub initial_time: u64,
+    /// Increment per move in seconds
+    pub increment: u64,
+}
+
+impl TimeControl {
+    pub fn new(minutes: u64, increment_secs: u64) -> Self {
+        Self {
+            initial_time: minutes * 60,
+            increment: increment_secs,
+        }
+    }
+
+    /// Unlimited time
+    pub fn unlimited() -> Self {
+        Self {
+            initial_time: 0,
+            increment: 0,
+        }
+    }
+
+    pub fn is_unlimited(&self) -> bool {
+        self.initial_time == 0
+    }
+}
+
+impl Default for TimeControl {
+    fn default() -> Self {
+        Self::new(10, 5) // Rapid 10+5
+    }
+}
+
+impl std::fmt::Display for TimeControl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_unlimited() {
+            write!(f, "Unlimited")
+        } else {
+            write!(f, "{}+{}", self.initial_time / 60, self.increment)
+        }
+    }
+}
+
+/// Chess clock for both players
+#[derive(Debug, Clone)]
+pub struct ChessClock {
+    /// Time control settings
+    pub time_control: TimeControl,
+    /// White's remaining time in milliseconds
+    pub white_time_ms: u64,
+    /// Black's remaining time in milliseconds
+    pub black_time_ms: u64,
+    /// When the current player's clock started (if running)
+    pub started_at: Option<Instant>,
+    /// Which side's clock is running
+    pub running_for: Option<Color>,
+    /// Is the clock enabled?
+    pub enabled: bool,
+}
+
+impl Default for ChessClock {
+    fn default() -> Self {
+        Self::new(TimeControl::default())
+    }
+}
+
+impl ChessClock {
+    pub fn new(time_control: TimeControl) -> Self {
+        let initial_ms = time_control.initial_time * 1000;
+        Self {
+            time_control,
+            white_time_ms: initial_ms,
+            black_time_ms: initial_ms,
+            started_at: None,
+            running_for: None,
+            enabled: !time_control.is_unlimited(),
+        }
+    }
+
+    /// Start the clock for a player
+    pub fn start(&mut self, color: Color) {
+        if self.enabled {
+            self.started_at = Some(Instant::now());
+            self.running_for = Some(color);
+        }
+    }
+
+    /// Stop the clock (after a move) and add increment
+    pub fn stop_and_increment(&mut self) {
+        if !self.enabled {
+            return;
+        }
+
+        if let (Some(started), Some(color)) = (self.started_at, self.running_for) {
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            let increment_ms = self.time_control.increment * 1000;
+
+            match color {
+                Color::White => {
+                    self.white_time_ms =
+                        self.white_time_ms.saturating_sub(elapsed_ms) + increment_ms;
+                }
+                Color::Black => {
+                    self.black_time_ms =
+                        self.black_time_ms.saturating_sub(elapsed_ms) + increment_ms;
+                }
+            }
+        }
+
+        self.started_at = None;
+        self.running_for = None;
+    }
+
+    /// Get current remaining time for a player (accounting for running clock)
+    pub fn remaining_time(&self, color: Color) -> Duration {
+        let base_ms = match color {
+            Color::White => self.white_time_ms,
+            Color::Black => self.black_time_ms,
+        };
+
+        let elapsed_ms = if self.running_for == Some(color) {
+            self.started_at
+                .map(|s| s.elapsed().as_millis() as u64)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        Duration::from_millis(base_ms.saturating_sub(elapsed_ms))
+    }
+
+    /// Check if a player has timed out
+    pub fn is_timeout(&self, color: Color) -> bool {
+        self.enabled && self.remaining_time(color).is_zero()
+    }
+
+    /// Format time as MM:SS
+    pub fn format_time(duration: Duration) -> String {
+        let total_secs = duration.as_secs();
+        let mins = total_secs / 60;
+        let secs = total_secs % 60;
+
+        if duration.as_millis() < 10_000 {
+            // Show tenths when under 10 seconds
+            let tenths = (duration.as_millis() % 1000) / 100;
+            format!("{}:{:02}.{}", mins, secs, tenths)
+        } else {
+            format!("{}:{:02}", mins, secs)
+        }
+    }
 }
 
 impl Default for GameState {
@@ -54,12 +216,17 @@ impl GameState {
             last_move: None,
             result: GameResult::InProgress,
             engine_thinking: false,
+            clock: ChessClock::default(),
+            evaluation: 0,
         }
     }
 
-    /// Reset to starting position
-    pub fn reset(&mut self) {
-        *self = Self::new();
+    /// Create with specific time control
+    pub fn with_time_control(time_control: TimeControl) -> Self {
+        Self {
+            clock: ChessClock::new(time_control),
+            ..Self::new()
+        }
     }
 
     /// Select a square (for piece selection)
@@ -80,20 +247,19 @@ impl GameState {
             }
         }
 
-        // Deselect
         self.selected_square = None;
         self.legal_moves_from_selected.clear();
     }
 
-    /// Update legal moves from the selected square
+    /// Update legal moves from selected square
     fn update_legal_moves(&mut self) {
         self.legal_moves_from_selected.clear();
-        
+
         if let Some(from) = self.selected_square {
             let mut pos = self.position.clone();
             let mut moves = Vec::new();
             legal_moves_into(&mut pos, &mut moves);
-            
+
             for mv in moves {
                 if mv.from == from {
                     self.legal_moves_from_selected.insert(mv.to);
@@ -108,14 +274,9 @@ impl GameState {
         let mut moves = Vec::new();
         legal_moves_into(&mut pos, &mut moves);
 
-        // Find the matching move (handle promotions)
+        // Find the matching move (handle promotions - default to queen)
         let mv = moves.iter().find(|m| {
-            m.from == from && m.to == to && m.promo.is_none()
-        }).or_else(|| {
-            // Default to queen promotion
-            moves.iter().find(|m| {
-                m.from == from && m.to == to && m.promo == Some(PieceKind::Queen)
-            })
+            m.from == from && m.to == to && (m.promo.is_none() || m.promo == Some(PieceKind::Queen))
         });
 
         if let Some(&mv) = mv {
@@ -125,63 +286,94 @@ impl GameState {
 
     /// Apply a move to the game state
     pub fn apply_move(&mut self, mv: Move) {
-        let san = self.move_to_san(mv);
-        let _undo = self.position.make_move(mv);
-        
+        // Stop clock for current player and add increment
+        self.clock.stop_and_increment();
+
+        // Generate SAN before making the move
+        let san = self.generate_san(mv);
+
+        self.position.make_move(mv);
         self.moves.push(MoveRecord { san });
-        
         self.last_move = Some((mv.from, mv.to));
         self.selected_square = None;
         self.legal_moves_from_selected.clear();
-        
+
+        // Start clock for next player
+        self.clock.start(self.position.side_to_move);
+
         // Check for game end
-        self.update_result();
+        self.check_game_end();
     }
 
-    /// Convert move to SAN notation (simplified)
-    fn move_to_san(&self, mv: Move) -> String {
+    /// Generate SAN notation for a move
+    fn generate_san(&self, mv: Move) -> String {
         let piece = self.position.piece_at(mv.from);
-        let is_capture = self.position.piece_at(mv.to).is_some() || mv.is_en_passant;
-        
-        let piece_char = match piece.map(|p| p.kind) {
-            Some(PieceKind::King) => if mv.is_castle { "" } else { "K" },
-            Some(PieceKind::Queen) => "Q",
-            Some(PieceKind::Rook) => "R",
-            Some(PieceKind::Bishop) => "B",
-            Some(PieceKind::Knight) => "N",
-            Some(PieceKind::Pawn) | None => "",
-        };
+        if piece.is_none() {
+            return format!("{}{}", sq_name(mv.from), sq_name(mv.to));
+        }
+        let piece = piece.unwrap();
 
+        // Castling
         if mv.is_castle {
-            return if mv.to % 8 > mv.from % 8 { "O-O".to_string() } else { "O-O-O".to_string() };
+            if mv.to > mv.from {
+                return "O-O".to_string();
+            } else {
+                return "O-O-O".to_string();
+            }
         }
 
-        let from_file = (b'a' + mv.from % 8) as char;
-        let to_file = (b'a' + mv.to % 8) as char;
-        let to_rank = (b'1' + mv.to / 8) as char;
+        let mut san = String::new();
 
-        let capture = if is_capture { "x" } else { "" };
-        let file_prefix = if piece_char.is_empty() && is_capture {
-            from_file.to_string()
-        } else {
-            String::new()
-        };
+        // Piece letter (except for pawns)
+        match piece.kind {
+            PieceKind::King => san.push('K'),
+            PieceKind::Queen => san.push('Q'),
+            PieceKind::Rook => san.push('R'),
+            PieceKind::Bishop => san.push('B'),
+            PieceKind::Knight => san.push('N'),
+            PieceKind::Pawn => {}
+        }
 
-        let promo = mv.promo.map(|k| {
-            match k {
-                PieceKind::Queen => "=Q",
-                PieceKind::Rook => "=R",
-                PieceKind::Bishop => "=B",
-                PieceKind::Knight => "=N",
-                _ => "",
+        // Capture indicator
+        let is_capture = self.position.piece_at(mv.to).is_some() || mv.is_en_passant;
+        if is_capture {
+            if piece.kind == PieceKind::Pawn {
+                san.push((b'a' + (mv.from % 8)) as char);
             }
-        }).unwrap_or("");
+            san.push('x');
+        }
 
-        format!("{}{}{}{}{}{}", piece_char, file_prefix, capture, to_file, to_rank, promo)
+        // Destination square
+        san.push_str(&sq_name(mv.to));
+
+        // Promotion
+        if let Some(promo) = mv.promo {
+            san.push('=');
+            san.push(match promo {
+                PieceKind::Queen => 'Q',
+                PieceKind::Rook => 'R',
+                PieceKind::Bishop => 'B',
+                PieceKind::Knight => 'N',
+                _ => '?',
+            });
+        }
+
+        san
     }
 
-    /// Update game result based on current position
-    fn update_result(&mut self) {
+    /// Check if the game has ended
+    fn check_game_end(&mut self) {
+        // Check for timeout
+        if self.clock.is_timeout(Color::White) {
+            self.result = GameResult::WhiteTimeout;
+            return;
+        }
+        if self.clock.is_timeout(Color::Black) {
+            self.result = GameResult::BlackTimeout;
+            return;
+        }
+
+        // Check for checkmate/stalemate
         let mut pos = self.position.clone();
         let mut moves = Vec::new();
         legal_moves_into(&mut pos, &mut moves);
@@ -202,4 +394,15 @@ impl GameState {
         }
     }
 
+    /// Set the evaluation (from engine analysis)
+    pub fn set_evaluation(&mut self, eval_centipawns: i32) {
+        self.evaluation = eval_centipawns;
+    }
+}
+
+/// Convert square index to algebraic notation
+fn sq_name(sq: u8) -> String {
+    let file = (b'a' + sq % 8) as char;
+    let rank = (b'1' + sq / 8) as char;
+    format!("{}{}", file, rank)
 }
