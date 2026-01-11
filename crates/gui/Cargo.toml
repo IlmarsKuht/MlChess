@@ -1,0 +1,27 @@
+[package]
+name = "chess_gui"
+version = "0.1.0"
+edition = "2021"
+description = "GUI application for ML-chess: play games, run tournaments, track Elo"
+authors = ["ML-chess"]
+
+[[bin]]
+name = "chess_gui"
+path = "src/main.rs"
+
+[dependencies]
+# Core chess logic
+chess_core = { path = "../chess_core" }
+classical_engine = { path = "../classical_engine" }
+ml_engine = { path = "../ml_engine" }
+tournament = { path = "../tournament" }
+
+# GUI framework
+iced = { version = "0.13", features = ["tokio", "svg"] }
+
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
+
+# Serialization for settings
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

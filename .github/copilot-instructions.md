@@ -5,14 +5,35 @@ Purpose
 - Help contributors and AI agents be productive quickly when editing or extending this Rust ML chess engine workspace.
 - This is a machine learning chess engine project with infrastructure for training, evaluating, and iterating on neural network models.
 
-## ⚠️ IMPORTANT: Code Quality Rules
+## ⚠️ CRITICAL: Code Quality Standards
 
-**Before running tests or considering work complete:**
-1. Run `cargo build --workspace` and fix ALL warnings
-2. Run `cargo clippy --workspace` if available
-3. Only then run `cargo test --workspace`
+**This project demands NASA-level code quality. All changes must be complete, well-tested, and production-ready.**
 
-Warnings are treated as blockers. Do not leave unused imports, dead code warnings, or other compiler warnings unfixed.
+### Absolute Rules
+
+1. **NO incomplete refactors.** Every refactor must be fully complete. Do not leave TODO comments, half-implemented features, or "we'll fix this later" code. If you start a change, finish it entirely.
+
+2. **NO dead code.** Do not add `#[allow(dead_code)]` unless there is an extremely compelling reason (e.g., conditional compilation for platform-specific code, or trait implementations required by external interfaces). If code isn't used, remove it. Do not add "just in case" code.
+
+3. **NO warnings.** All compiler warnings are treated as errors. Fix every warning before considering work complete.
+
+4. **Complete implementations only.** When adding new features, implement them fully. Do not create stub functions, placeholder implementations, or scaffolding that doesn't work.
+
+### Before Completing Any Work
+
+1. Run `cargo build --workspace` — fix ALL warnings
+2. Run `cargo clippy --workspace` — fix ALL lints  
+3. Run `cargo test --workspace` — ensure ALL tests pass
+4. Review your changes — would a senior engineer approve this for a mission-critical system?
+
+### Quality Checklist
+
+- [ ] All code paths are implemented (no `todo!()`, `unimplemented!()`, or panic placeholders)
+- [ ] All imports are used
+- [ ] All functions/structs/fields are used
+- [ ] All match arms handle their cases completely
+- [ ] Error handling is explicit and complete
+- [ ] No `#[allow(...)]` attributes unless absolutely necessary with documented justification
 
 ## Quick architecture overview
 
@@ -22,6 +43,7 @@ Workspace crates:
 - `crates/ml_engine` — Neural network engine with ONNX inference. Implements `Engine` trait.
 - `crates/tournament` — Match runner for engine vs engine games with Elo tracking.
 - `crates/uci_engine` — UCI protocol binary, supports switching between engines at runtime.
+- `crates/gui` — Iced-based GUI for playing games, running tournaments, and tracking Elo ratings.
 
 Key files:
 - `chess_core/src/lib.rs` — Defines the `Engine` trait that all engines implement.

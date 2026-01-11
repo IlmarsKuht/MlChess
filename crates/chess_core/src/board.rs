@@ -68,14 +68,14 @@ impl Position {
             PieceKind::Knight,
             PieceKind::Rook,
         ];
-        for f in 0..8 {
+        for (f, &kind) in back.iter().enumerate() {
             p.board[f] = Some(Piece {
                 color: Color::White,
-                kind: back[f],
+                kind,
             });
             p.board[56 + f] = Some(Piece {
                 color: Color::Black,
-                kind: back[f],
+                kind,
             });
         }
         p
@@ -176,10 +176,11 @@ impl Position {
 
     pub fn king_sq(&self, c: Color) -> Option<u8> {
         for i in 0..64 {
-            if let Some(pc) = self.board[i] {
-                if pc.color == c && pc.kind == PieceKind::King {
-                    return Some(i as u8);
-                }
+            if let Some(pc) = self.board[i]
+                && pc.color == c
+                && pc.kind == PieceKind::King
+            {
+                return Some(i as u8);
             }
         }
         None
@@ -209,12 +210,12 @@ impl Position {
             Color::Black => &[(-1, 1), (1, 1)],
         };
         for (df, dr) in pawn_dirs {
-            if let Some(s) = sq(tf + df, tr + dr) {
-                if let Some(pc) = self.piece_at(s) {
-                    if pc.color == by && pc.kind == PieceKind::Pawn {
-                        return true;
-                    }
-                }
+            if let Some(s) = sq(tf + df, tr + dr)
+                && let Some(pc) = self.piece_at(s)
+                && pc.color == by
+                && pc.kind == PieceKind::Pawn
+            {
+                return true;
             }
         }
 
@@ -230,12 +231,12 @@ impl Position {
             (-2, -1),
         ];
         for (df, dr) in knight {
-            if let Some(s) = sq(tf + df, tr + dr) {
-                if let Some(pc) = self.piece_at(s) {
-                    if pc.color == by && pc.kind == PieceKind::Knight {
-                        return true;
-                    }
-                }
+            if let Some(s) = sq(tf + df, tr + dr)
+                && let Some(pc) = self.piece_at(s)
+                && pc.color == by
+                && pc.kind == PieceKind::Knight
+            {
+                return true;
             }
         }
 
@@ -251,12 +252,12 @@ impl Position {
             (-1, -1),
         ];
         for (df, dr) in king {
-            if let Some(s) = sq(tf + df, tr + dr) {
-                if let Some(pc) = self.piece_at(s) {
-                    if pc.color == by && pc.kind == PieceKind::King {
-                        return true;
-                    }
-                }
+            if let Some(s) = sq(tf + df, tr + dr)
+                && let Some(pc) = self.piece_at(s)
+                && pc.color == by
+                && pc.kind == PieceKind::King
+            {
+                return true;
             }
         }
 
@@ -405,24 +406,24 @@ impl Position {
             }
         }
         // If rook captured on its home square, remove right
-        if let Some(cp) = captured {
-            if cp.kind == PieceKind::Rook {
-                match cp.color {
-                    Color::White => {
-                        if to == 0 {
-                            self.castling.wq = false;
-                        }
-                        if to == 7 {
-                            self.castling.wk = false;
-                        }
+        if let Some(cp) = captured
+            && cp.kind == PieceKind::Rook
+        {
+            match cp.color {
+                Color::White => {
+                    if to == 0 {
+                        self.castling.wq = false;
                     }
-                    Color::Black => {
-                        if to == 56 {
-                            self.castling.bq = false;
-                        }
-                        if to == 63 {
-                            self.castling.bk = false;
-                        }
+                    if to == 7 {
+                        self.castling.wk = false;
+                    }
+                }
+                Color::Black => {
+                    if to == 56 {
+                        self.castling.bq = false;
+                    }
+                    if to == 63 {
+                        self.castling.bk = false;
                     }
                 }
             }

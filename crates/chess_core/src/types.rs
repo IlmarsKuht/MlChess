@@ -86,7 +86,7 @@ pub fn coord_to_sq(c: &str) -> Option<u8> {
     if !(b'a'..=b'h').contains(&f) || !(b'1'..=b'8').contains(&r) {
         return None;
     }
-    let file = (f - b'a') as u8;
-    let rank = (r - b'1') as u8;
+    let file = f - b'a';
+    let rank = r - b'1';
     Some(rank * 8 + file)
 }

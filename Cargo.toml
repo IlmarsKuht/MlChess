@@ -5,6 +5,7 @@ members = [
   "crates/ml_engine",
   "crates/tournament",
   "crates/uci_engine",
+  "crates/gui",
 ]
 resolver = "2"
 
