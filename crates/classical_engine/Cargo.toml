@@ -1,0 +1,9 @@
+[package]
+name = "classical_engine"
+version = "0.1.0"
+edition = "2021"
+description = "Classical alpha-beta search chess engine with material evaluation"
+authors = ["ML-chess"]
+
+[dependencies]
+chess_core = { path = "../chess_core" }

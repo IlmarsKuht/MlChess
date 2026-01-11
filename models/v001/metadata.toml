@@ -1,0 +1,53 @@
+# Model Version: v001
+# This is a template for model metadata.
+# Each model version should have its own metadata.toml file.
+
+# Version identifier (matches directory name)
+version = "v001"
+
+# Human-readable name
+name = "First Neural Eval"
+
+# Description of what this model does
+description = "Simple feedforward network for position evaluation"
+
+# Architecture details
+[architecture]
+type = "feedforward"           # feedforward, cnn, transformer
+input_features = 768           # 12 planes × 64 squares
+hidden_layers = [256, 128]     # Hidden layer sizes
+output_type = "value"          # value, policy, policy_value
+activation = "relu"
+
+# Training parameters
+[training]
+parent_version = ""            # Empty for first version, or "v000" etc.
+created = "2026-01-11T00:00:00Z"
+epochs = 0                     # Filled after training
+batch_size = 128
+learning_rate = 0.001
+optimizer = "adam"
+dataset = ""                   # Path or description of training data
+dataset_size = 0               # Number of positions trained on
+
+# Evaluation metrics (filled after training/testing)
+[metrics]
+training_loss = 0.0
+validation_loss = 0.0
+test_accuracy = 0.0            # For classification tasks
+elo_estimate = 0               # Estimated Elo from self-play or matches
+
+# Match results against other versions
+[[matches]]
+opponent = "classical"         # Version name of opponent
+games = 0
+wins = 0
+losses = 0
+draws = 0
+elo_diff = 0                   # Estimated Elo difference
+
+# Notes for human readers
+[notes]
+changelog = "Initial template - no trained model yet"
+known_issues = ""
+next_steps = "Train on lichess dataset, evaluate vs classical engine"

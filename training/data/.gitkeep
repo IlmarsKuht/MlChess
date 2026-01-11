@@ -1,0 +1,6 @@
+# Training data directory
+# Download chess games here (e.g., from Lichess database)
+
+# Example:
+# wget https://database.lichess.org/standard/lichess_db_standard_rated_2023-01.pgn.zst
+# zstd -d lichess_db_standard_rated_2023-01.pgn.zst

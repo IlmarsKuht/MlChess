@@ -1,0 +1,12 @@
+# ML-chess Training Environment
+# Python training scripts for neural network chess engines
+
+# Install dependencies
+pip install torch>=2.0.0
+pip install numpy>=1.24.0
+pip install onnx>=1.14.0
+pip install onnxruntime>=1.15.0
+pip install python-chess>=1.9.0
+pip install tqdm>=4.65.0
+pip install tensorboard>=2.13.0
+pip install toml>=0.10.0

@@ -1,0 +1,11 @@
+# Model files (.onnx) go here
+# This file ensures the directory is tracked by git
+
+# Example model file:
+# model.onnx - The trained ONNX model
+
+# To use this model:
+# 1. Train using training/train.py
+# 2. Export to ONNX format
+# 3. Place model.onnx in this directory
+# 4. Update metadata.toml with training details

@@ -1,0 +1,18 @@
+[package]
+name = "ml_engine"
+version = "0.1.0"
+edition = "2021"
+description = "Neural network chess engine with ONNX inference"
+authors = ["ML-chess"]
+
+[dependencies]
+chess_core = { path = "../chess_core" }
+
+# ONNX Runtime for neural network inference
+# Using tract as it's pure Rust and easier to build
+tract-onnx = { version = "0.21", optional = true }
+
+[features]
+default = []
+# Enable ONNX inference (requires model file)
+onnx = ["tract-onnx"]

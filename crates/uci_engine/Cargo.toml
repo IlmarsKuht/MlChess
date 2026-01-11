@@ -1,7 +1,9 @@
 [package]
 name = "uci_engine"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
 chess_core = { path = "../chess_core" }
+classical_engine = { path = "../classical_engine" }
+ml_engine = { path = "../ml_engine" }

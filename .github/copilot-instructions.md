@@ -2,54 +2,103 @@
 # Copilot / AI agent instructions — ML-chess
 
 Purpose
-- Help contributors and AI agents be productive quickly when editing or extending this Rust chess engine workspace.
+- Help contributors and AI agents be productive quickly when editing or extending this Rust ML chess engine workspace.
+- This is a machine learning chess engine project with infrastructure for training, evaluating, and iterating on neural network models.
 
-Quick architecture overview
-- Workspace with two crates: `crates/chess_core` (engine core) and `crates/uci_engine` (UCI binary).
-- `crates/chess_core/src/` responsibilities:
-  - `board.rs` and `types.rs`: canonical position representation and related types.
-  - `movegen.rs`: move generation and rules enforcement (core of correctness).
-  - `perft.rs`: perft implementation used by tests to validate move generation.
-  - `search.rs` / `eval.rs`: search algorithm and position evaluation.
-  - `uci.rs`: helpers for UCI integration used by the engine binary.
-- `crates/uci_engine/src/main.rs` wires the UCI protocol to the engine APIs in `chess_core`.
+## ⚠️ IMPORTANT: Code Quality Rules
 
-Developer workflows / useful commands
-- Build whole workspace: `cargo build --workspace`.
-- Run all tests: `cargo test --workspace`.
-- Run perft tests only (integration test file at `crates/chess_core/tests/perft_tests.rs`):
-  - `cargo test -p chess_core --test perft_tests`
-- Run the UCI engine (interactive): `cargo run -p uci_engine` (add `--release` for optimized binary).
-- Manual GUI testing: point Cute Chess UI at the `uci_engine` binary (e.g., `target/release/uci_engine.exe`) via UCI; keep an eye on `info` search outputs for eval history.
-- Incremental build artifacts and compiled crates appear under `target/`.
+**Before running tests or considering work complete:**
+1. Run `cargo build --workspace` and fix ALL warnings
+2. Run `cargo clippy --workspace` if available
+3. Only then run `cargo test --workspace`
 
-Project-specific patterns & conventions
-- Perft is the canonical correctness check for move generation. Tests invoke `Position::from_fen(...)` and `perft(&mut pos, depth)` (see `crates/chess_core/tests/perft_tests.rs`).
-- Public surface: `chess_core::Position` and functions exported from `lib.rs` are the integration points used by `uci_engine`.
-- Mutability convention: many core functions accept `&mut Position` (e.g., `perft`, move application). Preserve this pattern when adding helpers.
-- Tests: integration-style tests live in `crates/chess_core/tests/` (not `src/tests`). Add perft or regression tests there when fixing generator/search bugs.
+Warnings are treated as blockers. Do not leave unused imports, dead code warnings, or other compiler warnings unfixed.
 
-Editing guidance and examples
-- To add a new move-generation edge-case test, copy style from `perft_tests.rs`:
-  - Construct `Position` via `Position::from_fen(fen_str)` and call `perft(&mut pos, depth)`.
-- To change the public API used by `uci_engine`, update `crates/chess_core/src/lib.rs` and then run `cargo test --workspace` to catch compile errors across crates.
-- When implementing search/eval changes, run a focused test run: `cargo test -p chess_core`.
+## Quick architecture overview
 
-Integration & cross-crate notes
-- `uci_engine` depends on `chess_core` via workspace path. Keep `chess_core` public API stable for `uci_engine` unless both crates are adjusted together.
-- UCI parsing and orchestration live in `crates/uci_engine/src/main.rs` and may import helpers from `chess_core::uci`.
+Workspace crates:
+- `crates/chess_core` — Core game logic: board representation, move generation, perft, UCI helpers. NO engine logic here.
+- `crates/classical_engine` — Classical alpha-beta search with material evaluation. Implements `Engine` trait.
+- `crates/ml_engine` — Neural network engine with ONNX inference. Implements `Engine` trait.
+- `crates/tournament` — Match runner for engine vs engine games with Elo tracking.
+- `crates/uci_engine` — UCI protocol binary, supports switching between engines at runtime.
 
-What to look for when triaging bugs
-- If perft mismatch occurs, start at `crates/chess_core/src/movegen.rs` and `perft.rs`.
-- For search/evaluation regressions, inspect `search.rs` and `eval.rs` and re-run targeted tests.
+Key files:
+- `chess_core/src/lib.rs` — Defines the `Engine` trait that all engines implement.
+- `chess_core/src/board.rs`, `types.rs` — Position representation and core types.
+- `chess_core/src/movegen.rs` — Legal move generation.
+- `classical_engine/src/search.rs` — Negamax with alpha-beta pruning.
+- `ml_engine/src/lib.rs` — NeuralEngine with ONNX model loading.
+- `tournament/src/elo.rs` — Elo rating calculations.
 
-Search tips (code patterns to grep)
-- `Position::from_fen` — where positions are created.
-- `perft(` — perft implementation and tests.
-- `uci::` and `uci_engine` — UCI integration points.
+External directories:
+- `models/` — Versioned neural network models (v001/, v002/, etc.) with metadata.toml
+- `training/` — Python scripts for training neural networks (PyTorch → ONNX)
 
-If you're unsure
-- Run the perft tests first — they catch move generation issues quickly.
-- Ask to run CI or provide failing `cargo test` output; include the failing test name and FEN used.
+## Developer workflows / useful commands
 
-Please review this guidance and tell me if any areas need more detail (build flags, CI steps, or uncommon local scripts).
+```bash
+# Build and check for warnings (ALWAYS do this first)
+cargo build --workspace
+
+# Run all tests
+cargo test --workspace
+
+# Run perft tests only
+cargo test -p chess_core --test perft_tests
+
+# Run the UCI engine
+cargo run -p uci_engine --release
+
+# Run tournament match
+cargo run -p tournament -- match classical neural --games 10 --depth 4
+
+# Show Elo leaderboard
+cargo run -p tournament -- leaderboard
+```
+
+## Engine trait pattern
+
+All engines implement this trait from `chess_core`:
+```rust
+pub trait Engine: Send {
+    fn search(&mut self, pos: &Position, depth: u8) -> SearchResult;
+    fn name(&self) -> &str;
+    fn author(&self) -> &str { "ML-chess" }
+    fn new_game(&mut self) {}
+    fn set_option(&mut self, name: &str, value: &str) -> bool { false }
+}
+```
+
+## Model versioning
+
+Models are stored in `models/vNNN/` directories:
+- `model.onnx` — The trained ONNX model
+- `metadata.toml` — Training params, parent version, metrics, match results
+
+Training workflow:
+1. Train in Python: `cd training && python train.py --output ../models/v002/`
+2. Test in Rust: `cargo run -p tournament -- match classical neural:v002`
+3. Track Elo in `tournament_elo.json`
+
+## Project-specific patterns & conventions
+
+- The `Engine` trait is the abstraction for swappable engines.
+- Perft is the canonical correctness check for move generation.
+- `Position::from_fen(...)` creates positions; `legal_moves_into()` generates moves.
+- Mutability convention: many core functions accept `&mut Position`.
+- Integration tests live in `crates/*/tests/` directories.
+
+## What to look for when triaging bugs
+
+- Perft mismatch → check `movegen.rs`
+- Search/eval issues → check `classical_engine/src/search.rs` or `ml_engine/src/lib.rs`
+- UCI protocol issues → check `uci_engine/src/main.rs`
+- Model loading issues → check `ml_engine/src/onnx_engine.rs`
+
+## Search tips (code patterns to grep)
+
+- `impl Engine for` — Engine implementations
+- `Position::from_fen` — Position creation
+- `SearchResult` — Search return type
+- `perft(` — Perft tests
