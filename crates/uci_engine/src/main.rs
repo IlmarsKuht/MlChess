@@ -7,7 +7,7 @@
 //! - Classical: Alpha-beta search with material evaluation
 //! - Neural: Neural network-based evaluation (requires trained model)
 
-use chess_core::{move_to_uci, Engine, Position, set_position_from_uci};
+use chess_core::{move_to_uci, set_position_from_uci, Engine, Position};
 use classical_engine::ClassicalEngine;
 use ml_engine::NeuralEngine;
 use std::io::{self, BufRead, Write};
