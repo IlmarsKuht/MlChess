@@ -494,6 +494,7 @@ impl ChessApp {
                     ..Default::default()
                 }),
         ]
+        .width(EVAL_BAR_WIDTH)
         .into()
     }
 

@@ -84,16 +84,12 @@ impl<'a> BoardView<'a> {
         let content: Element<'a, BoardMessage> = if let Some(p) = piece {
             // Use SVG piece
             let svg_handle = get_piece_svg(p.color, p.kind);
-            container(
-                svg_handle
-                    .width(SQUARE_SIZE * 0.85)
-                    .height(SQUARE_SIZE * 0.85),
-            )
-            .width(SQUARE_SIZE)
-            .height(SQUARE_SIZE)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill)
-            .into()
+            container(svg_handle.width(SQUARE_SIZE).height(SQUARE_SIZE))
+                .width(SQUARE_SIZE)
+                .height(SQUARE_SIZE)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .into()
         } else if is_legal_target {
             // Show dot for legal moves
             text("●")
