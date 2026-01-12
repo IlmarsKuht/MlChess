@@ -6,7 +6,7 @@
 mod eval;
 mod search;
 
-use chess_core::{Engine, Position, SearchResult};
+use chess_core::{Engine, Position, SearchLimits, SearchResult};
 
 /// Classical chess engine using negamax with alpha-beta pruning.
 ///
@@ -14,6 +14,7 @@ use chess_core::{Engine, Position, SearchResult};
 /// - Negamax search with alpha-beta pruning
 /// - Simple material evaluation
 /// - 50-move rule and threefold repetition detection
+/// - Time control support for move time limits
 #[derive(Debug, Clone, Default)]
 pub struct ClassicalEngine {
     /// Node counter for statistics
@@ -27,15 +28,18 @@ impl ClassicalEngine {
 }
 
 impl Engine for ClassicalEngine {
-    fn search(&mut self, pos: &Position, depth: u8) -> SearchResult {
+    fn search(&mut self, pos: &Position, limits: SearchLimits) -> SearchResult {
         self.nodes = 0;
-        let result = search::pick_best_move(pos, depth, &mut self.nodes);
+        limits.start();
+
+        let outcome = search::pick_best_move(pos, limits.depth, &mut self.nodes, &limits.time_control);
 
         SearchResult {
-            best_move: result.map(|(mv, _)| mv),
-            score: result.map(|(_, s)| s).unwrap_or(0),
-            depth,
+            best_move: outcome.best_move.map(|(mv, _)| mv),
+            score: outcome.best_move.map(|(_, s)| s).unwrap_or(0),
+            depth: limits.depth,
             nodes: self.nodes,
+            stopped: outcome.stopped,
         }
     }
 
@@ -54,4 +58,3 @@ impl Engine for ClassicalEngine {
 
 // Re-export for direct use if needed
 pub use eval::evaluate;
-pub use search::pick_best_move;

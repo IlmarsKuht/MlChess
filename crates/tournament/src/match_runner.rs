@@ -1,6 +1,7 @@
 //! Match runner for playing games between engines
 
-use chess_core::{legal_moves_into, Engine, Position};
+use chess_core::{legal_moves_into, Engine, Position, SearchLimits};
+use std::time::Duration;
 
 use crate::elo::{GameResult, MatchResult};
 
@@ -11,6 +12,8 @@ pub struct MatchConfig {
     pub num_games: u32,
     /// Search depth for engines
     pub depth: u8,
+    /// Maximum time per move (None = no limit)
+    pub time_per_move: Option<Duration>,
     /// Maximum moves per game before declaring draw
     pub max_moves: u32,
     /// Whether to alternate colors each game
@@ -24,9 +27,20 @@ impl Default for MatchConfig {
         Self {
             num_games: 10,
             depth: 4,
+            time_per_move: None,
             max_moves: 200,
             alternate_colors: true,
             verbose: true,
+        }
+    }
+}
+
+impl MatchConfig {
+    /// Create search limits based on this config
+    fn search_limits(&self) -> SearchLimits {
+        match self.time_per_move {
+            Some(time) => SearchLimits::depth_and_time(self.depth, time),
+            None => SearchLimits::depth(self.depth),
         }
     }
 }
@@ -106,10 +120,13 @@ impl MatchRunner {
         black.new_game();
 
         for _move_num in 0..self.config.max_moves {
+            // Create fresh search limits for each move (resets the clock)
+            let limits = self.config.search_limits();
+
             let result = if pos.side_to_move == chess_core::Color::White {
-                white.search(&pos, self.config.depth)
+                white.search(&pos, limits)
             } else {
-                black.search(&pos, self.config.depth)
+                black.search(&pos, limits)
             };
 
             match result.best_move {

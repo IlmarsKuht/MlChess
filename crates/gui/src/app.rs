@@ -5,7 +5,7 @@ use crate::game::{ChessClock, GameResult, GameState, TimeControl};
 use crate::styles::{EVAL_BAR_WIDTH, EVAL_BLACK, EVAL_WHITE, PANEL_WIDTH, SQUARE_SIZE};
 use crate::tournament_view::{self, TournamentMessage, TournamentState};
 
-use chess_core::{legal_moves_into, Color, Engine, Move, Position};
+use chess_core::{legal_moves_into, Color, Engine, Move, Position, SearchLimits};
 use classical_engine::ClassicalEngine;
 use iced::time;
 use iced::widget::{
@@ -159,6 +159,9 @@ pub enum Message {
 
     // Tournament
     Tournament(TournamentMessage),
+
+    // Application
+    Quit,
 }
 
 impl ChessApp {
@@ -222,6 +225,7 @@ impl ChessApp {
                 .unwrap_or_default();
             let num_games = self.tournament.num_games;
             let depth = self.tournament.depth;
+            let time_per_move_ms = self.tournament.time_per_move_ms;
             let progress = self.tournament.progress;
 
             subscriptions.push(
@@ -232,6 +236,7 @@ impl ChessApp {
                     engine2_name,
                     num_games,
                     depth,
+                    time_per_move_ms,
                     progress,
                 )
                 .map(Message::Tournament),
@@ -351,6 +356,10 @@ impl ChessApp {
             }
 
             Message::Tournament(msg) => self.handle_tournament_message(msg),
+
+            Message::Quit => {
+                std::process::exit(0);
+            }
         }
     }
 
@@ -389,7 +398,7 @@ impl ChessApp {
                         PlayerType::Human => unreachable!(),
                     };
 
-                    let result = engine.search(&position, depth);
+                    let result = engine.search(&position, SearchLimits::depth(depth));
                     // Convert score to white's perspective (engine returns from side-to-move's view)
                     let score_from_white = if side_to_move == Color::White {
                         result.score
@@ -428,6 +437,13 @@ impl ChessApp {
             TournamentMessage::DepthChanged(s) => {
                 if let Ok(d) = s.parse() {
                     self.tournament.depth = d;
+                }
+            }
+            TournamentMessage::TimePerMoveChanged(s) => {
+                if s.is_empty() {
+                    self.tournament.time_per_move_ms = 0;
+                } else if let Ok(ms) = s.parse() {
+                    self.tournament.time_per_move_ms = ms;
                 }
             }
             TournamentMessage::StartTournament => {
@@ -489,6 +505,14 @@ impl ChessApp {
         .spacing(5)
         .padding(10);
 
+        let quit_button = button(text("Quit"))
+            .on_press(Message::Quit)
+            .style(button::danger);
+
+        let header = row![tabs, iced::widget::horizontal_space(), quit_button]
+            .align_y(iced::Alignment::Center)
+            .padding(5);
+
         let content: Element<'_, Message> = match self.tab {
             Tab::Play => self.play_view(),
             Tab::Tournament => {
@@ -496,7 +520,7 @@ impl ChessApp {
             }
         };
 
-        column![tabs, horizontal_rule(2), content,].into()
+        column![header, horizontal_rule(2), content,].into()
     }
 
     /// Render the play/game view
@@ -807,6 +831,7 @@ fn create_engine(id: &str) -> Box<dyn Engine> {
 }
 
 /// Create a subscription that runs a tournament and emits position updates
+#[allow(clippy::too_many_arguments)]
 fn tournament_subscription(
     engine1_id: String,
     engine2_id: String,
@@ -814,6 +839,7 @@ fn tournament_subscription(
     engine2_name: String,
     num_games: u32,
     depth: u8,
+    time_per_move_ms: u64,
     _current_progress: u32,
 ) -> Subscription<TournamentMessage> {
     use iced::futures::SinkExt;
@@ -876,7 +902,17 @@ fn tournament_subscription(
                                 &mut *engine1
                             };
 
-                            let result = current_engine.search(&pos, depth);
+                            // Create search limits with time control if specified
+                            let limits = if time_per_move_ms > 0 {
+                                SearchLimits::depth_and_time(
+                                    depth,
+                                    Duration::from_millis(time_per_move_ms),
+                                )
+                            } else {
+                                SearchLimits::depth(depth)
+                            };
+
+                            let result = current_engine.search(&pos, limits);
 
                             match result.best_move {
                                 Some(mv) => {

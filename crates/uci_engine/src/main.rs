@@ -7,10 +7,11 @@
 //! - Classical: Alpha-beta search with material evaluation
 //! - Neural: Neural network-based evaluation (requires trained model)
 
-use chess_core::{move_to_uci, set_position_from_uci, Engine, Position};
+use chess_core::{move_to_uci, set_position_from_uci, Engine, Position, SearchLimits};
 use classical_engine::ClassicalEngine;
 use ml_engine::NeuralEngine;
 use std::io::{self, BufRead, Write};
+use std::time::Duration;
 
 /// Available engine types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,10 +138,33 @@ fn main() {
                     }
                 }
 
+                // Parse optional movetime: "go movetime X" (in milliseconds)
+                let move_time: Option<Duration> = parts
+                    .iter()
+                    .position(|&x| x.eq_ignore_ascii_case("movetime"))
+                    .and_then(|idx| parts.get(idx + 1))
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .map(Duration::from_millis);
+
+                // Create search limits with time control
+                let base_limits = match move_time {
+                    Some(time) => SearchLimits::depth_and_time(search_depth, time),
+                    None => SearchLimits::depth(search_depth),
+                };
+
                 // Iterative deepening with info output
                 let mut final_mv = None;
+                base_limits.start(); // Start the clock once for all iterations
+
                 for d in 1..=search_depth {
-                    let result = engine.search(&pos, d);
+                    // Create limits for this depth iteration, reusing the same time control
+                    let limits = SearchLimits {
+                        depth: d,
+                        move_time,
+                        time_control: base_limits.time_control.clone(),
+                    };
+
+                    let result = engine.search(&pos, limits);
 
                     if let Some(mv) = result.best_move {
                         final_mv = Some(mv);
@@ -154,7 +178,17 @@ fn main() {
                         )
                         .ok();
                         stdout.flush().ok();
+
+                        // If search was stopped due to time, don't start next depth
+                        if result.stopped {
+                            break;
+                        }
                     } else {
+                        break;
+                    }
+
+                    // Check if we should stop before starting next iteration
+                    if base_limits.should_stop() {
                         break;
                     }
                 }

@@ -27,7 +27,7 @@ mod features;
 #[cfg(feature = "onnx")]
 mod onnx_engine;
 
-use chess_core::{legal_moves_into, Engine, Move, Position, SearchResult};
+use chess_core::{legal_moves_into, Engine, Move, Position, SearchLimits, SearchResult, TimeControl};
 use std::path::PathBuf;
 
 /// Neural network chess engine.
@@ -146,14 +146,21 @@ impl NeuralEngine {
         }
     }
 
-    /// Simple search using NN evaluation.
-    fn search_internal(&mut self, pos: &Position, depth: u8) -> Option<(Move, i32)> {
+    /// Simple search using NN evaluation with time control.
+    ///
+    /// Returns (best_move, score, stopped) where stopped indicates early termination.
+    fn search_internal(
+        &mut self,
+        pos: &Position,
+        depth: u8,
+        tc: &TimeControl,
+    ) -> (Option<(Move, i32)>, bool) {
         let mut tmp = pos.clone();
         let mut moves = Vec::with_capacity(64);
         legal_moves_into(&mut tmp, &mut moves);
 
         if moves.is_empty() {
-            return None;
+            return (None, false);
         }
 
         if depth == 0 {
@@ -161,6 +168,11 @@ impl NeuralEngine {
             let mut best = moves[0];
             let mut best_score = i32::MIN;
             for mv in moves {
+                // Check time periodically
+                if tc.should_check_time(self.nodes) && tc.check_time() {
+                    return (Some((best, best_score)), true);
+                }
+
                 let undo = tmp.make_move(mv);
                 self.nodes += 1;
                 let score = -self.evaluate(&tmp);
@@ -170,7 +182,7 @@ impl NeuralEngine {
                     best = mv;
                 }
             }
-            return Some((best, best_score));
+            return (Some((best, best_score)), false);
         }
 
         // Simple 1-ply search with NN eval
@@ -178,20 +190,27 @@ impl NeuralEngine {
         let mut best_score = i32::MIN;
 
         for mv in moves {
+            // Check time before each root move
+            if tc.should_check_time(self.nodes) && tc.check_time() {
+                return (Some((best, best_score)), true);
+            }
+
             let undo = tmp.make_move(mv);
             self.nodes += 1;
 
-            let score = if depth > 1 {
+            let (score, stopped) = if depth > 1 {
                 // Recurse
-                -self
-                    .search_internal(&tmp, depth - 1)
-                    .map(|(_, s)| s)
-                    .unwrap_or(0)
+                let (result, stopped) = self.search_internal(&tmp, depth - 1, tc);
+                (-result.map(|(_, s)| s).unwrap_or(0), stopped)
             } else {
-                -self.evaluate(&tmp)
+                (-self.evaluate(&tmp), false)
             };
 
             tmp.unmake_move(mv, undo);
+
+            if stopped {
+                return (Some((best, best_score)), true);
+            }
 
             if score > best_score {
                 best_score = score;
@@ -199,20 +218,23 @@ impl NeuralEngine {
             }
         }
 
-        Some((best, best_score))
+        (Some((best, best_score)), false)
     }
 }
 
 impl Engine for NeuralEngine {
-    fn search(&mut self, pos: &Position, depth: u8) -> SearchResult {
+    fn search(&mut self, pos: &Position, limits: SearchLimits) -> SearchResult {
         self.nodes = 0;
-        let result = self.search_internal(pos, depth);
+        limits.start();
+
+        let (result, stopped) = self.search_internal(pos, limits.depth, &limits.time_control);
 
         SearchResult {
             best_move: result.map(|(mv, _)| mv),
             score: result.map(|(_, s)| s).unwrap_or(0),
-            depth,
+            depth: limits.depth,
             nodes: self.nodes,
+            stopped,
         }
     }
 
@@ -254,7 +276,7 @@ mod tests {
     fn test_neural_engine_fallback() {
         let mut engine = NeuralEngine::new();
         let pos = Position::startpos();
-        let result = engine.search(&pos, 2);
+        let result = engine.search(&pos, SearchLimits::depth(2));
         assert!(result.best_move.is_some());
     }
 

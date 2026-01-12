@@ -1,6 +1,7 @@
 pub mod board;
 pub mod movegen;
 pub mod perft;
+pub mod time_control;
 pub mod types;
 pub mod uci;
 
@@ -8,6 +9,7 @@ pub mod uci;
 pub use board::*;
 pub use movegen::*;
 pub use perft::perft;
+pub use time_control::*;
 pub use types::*;
 pub use uci::*;
 
@@ -26,6 +28,8 @@ pub struct SearchResult {
     pub depth: u8,
     /// Number of nodes searched (optional, for stats)
     pub nodes: u64,
+    /// Whether search was stopped early due to time limit
+    pub stopped: bool,
 }
 
 /// Trait that all chess engines must implement.
@@ -33,15 +37,15 @@ pub struct SearchResult {
 /// This allows swapping between classical (alpha-beta) engines,
 /// neural network engines, and hybrid approaches.
 pub trait Engine: Send {
-    /// Search the position to the given depth and return the best move.
+    /// Search the position with the given search limits.
     ///
     /// # Arguments
     /// * `pos` - The current position to analyze
-    /// * `depth` - Maximum search depth in plies
+    /// * `limits` - Search limits (depth, time, etc.)
     ///
     /// # Returns
     /// SearchResult containing best move, score, and statistics
-    fn search(&mut self, pos: &Position, depth: u8) -> SearchResult;
+    fn search(&mut self, pos: &Position, limits: SearchLimits) -> SearchResult;
 
     /// Returns the engine's name for UCI identification
     fn name(&self) -> &str;

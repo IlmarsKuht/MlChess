@@ -4,17 +4,23 @@
 
 use classical_engine::ClassicalEngine;
 use ml_engine::NeuralEngine;
-use tournament::{quick_match, EloTracker, MatchConfig, MatchRunner, TournamentConfig, TournamentResults};
+use tournament::{EloTracker, MatchConfig, MatchRunner, TournamentConfig, TournamentResults};
 use chess_core::Engine;
 use std::env;
+use std::time::Duration;
 
 fn print_usage() {
     println!("ML-chess Tournament Runner");
     println!();
     println!("Usage:");
-    println!("  tournament match <engine1> <engine2> [--games N] [--depth D]");
-    println!("  tournament gauntlet <challenger> [--games N] [--depth D]");
+    println!("  tournament match <engine1> <engine2> [--games N] [--depth D] [--time MS]");
+    println!("  tournament gauntlet <challenger> [--games N] [--depth D] [--time MS]");
     println!("  tournament leaderboard");
+    println!();
+    println!("Options:");
+    println!("  --games N, -g N    Number of games per match (default: 10)");
+    println!("  --depth D, -d D    Search depth in plies (default: 4)");
+    println!("  --time MS, -t MS   Time limit per move in milliseconds (default: none)");
     println!();
     println!("Engines:");
     println!("  classical     - Alpha-beta with material eval");
@@ -23,6 +29,7 @@ fn print_usage() {
     println!();
     println!("Examples:");
     println!("  tournament match classical neural --games 20 --depth 4");
+    println!("  tournament match classical neural --depth 10 --time 1000");
     println!("  tournament gauntlet neural:v002 --games 10");
 }
 
@@ -64,6 +71,7 @@ fn run_match(args: &[String]) {
     // Parse optional arguments
     let mut num_games: u32 = 10;
     let mut depth: u8 = 4;
+    let mut time_per_move: Option<Duration> = None;
 
     let mut i = 2;
     while i < args.len() {
@@ -80,13 +88,26 @@ fn run_match(args: &[String]) {
                     i += 1;
                 }
             }
+            "--time" | "-t" => {
+                if i + 1 < args.len() {
+                    if let Ok(ms) = args[i + 1].parse::<u64>() {
+                        time_per_move = Some(Duration::from_millis(ms));
+                    }
+                    i += 1;
+                }
+            }
             _ => {}
         }
         i += 1;
     }
 
     println!("=== Match: {} vs {} ===", engine1_spec, engine2_spec);
-    println!("Games: {}, Depth: {}", num_games, depth);
+    print!("Games: {}, Depth: {}", num_games, depth);
+    if let Some(time) = time_per_move {
+        println!(", Time/move: {}ms", time.as_millis());
+    } else {
+        println!();
+    }
     println!();
 
     let mut engine1 = create_engine(engine1_spec);
@@ -95,6 +116,7 @@ fn run_match(args: &[String]) {
     let config = MatchConfig {
         num_games,
         depth,
+        time_per_move,
         verbose: true,
         ..Default::default()
     };
@@ -132,6 +154,7 @@ fn run_gauntlet(args: &[String]) {
     // Parse optional arguments
     let mut num_games: u32 = 10;
     let mut depth: u8 = 4;
+    let mut time_per_move: Option<Duration> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -148,6 +171,14 @@ fn run_gauntlet(args: &[String]) {
                     i += 1;
                 }
             }
+            "--time" | "-t" => {
+                if i + 1 < args.len() {
+                    if let Ok(ms) = args[i + 1].parse::<u64>() {
+                        time_per_move = Some(Duration::from_millis(ms));
+                    }
+                    i += 1;
+                }
+            }
             _ => {}
         }
         i += 1;
@@ -157,7 +188,12 @@ fn run_gauntlet(args: &[String]) {
 
     println!("=== Gauntlet: {} vs all ===", challenger_spec);
     println!("Opponents: {:?}", opponents);
-    println!("Games per match: {}, Depth: {}", num_games, depth);
+    print!("Games per match: {}, Depth: {}", num_games, depth);
+    if let Some(time) = time_per_move {
+        println!(", Time/move: {}ms", time.as_millis());
+    } else {
+        println!();
+    }
     println!();
 
     let mut tracker = EloTracker::load("tournament_elo.json").unwrap_or_default();
@@ -169,6 +205,7 @@ fn run_gauntlet(args: &[String]) {
         TournamentConfig {
             games_per_match: num_games,
             search_depth: depth,
+            time_per_move,
             ..Default::default()
         },
     );
@@ -179,7 +216,15 @@ fn run_gauntlet(args: &[String]) {
         let mut challenger = create_engine(challenger_spec);
         let mut opp_engine = create_engine(opponent);
 
-        let result = quick_match(challenger.as_mut(), opp_engine.as_mut(), num_games, depth);
+        let config = MatchConfig {
+            num_games,
+            depth,
+            time_per_move,
+            verbose: true,
+            ..Default::default()
+        };
+        let runner = MatchRunner::new(config);
+        let result = runner.run_match(challenger.as_mut(), opp_engine.as_mut());
 
         println!(
             "Result: {}-{}-{} (Score: {:.1}%)",

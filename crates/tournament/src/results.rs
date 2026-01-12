@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::time::Duration;
 
 use crate::elo::MatchResult;
 
@@ -31,6 +32,10 @@ pub struct MatchEntry {
 pub struct TournamentConfig {
     pub games_per_match: u32,
     pub search_depth: u8,
+    /// Time limit per move in milliseconds (None = no limit)
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_per_move: Option<Duration>,
     pub max_moves_per_game: u32,
 }
 
@@ -39,6 +44,7 @@ impl Default for TournamentConfig {
         Self {
             games_per_match: 10,
             search_depth: 4,
+            time_per_move: None,
             max_moves_per_game: 200,
         }
     }
@@ -83,9 +89,13 @@ impl TournamentResults {
         report.push_str(&format!("=== Tournament: {} ===\n\n", self.name));
         report.push_str(&format!("Participants: {}\n", self.participants.join(", ")));
         report.push_str(&format!(
-            "Config: {} games/match, depth {}\n\n",
+            "Config: {} games/match, depth {}",
             self.config.games_per_match, self.config.search_depth
         ));
+        if let Some(time) = self.config.time_per_move {
+            report.push_str(&format!(", {}ms/move", time.as_millis()));
+        }
+        report.push_str("\n\n");
 
         report.push_str("Results:\n");
         report.push_str(&format!(

@@ -43,6 +43,8 @@ pub struct TournamentState {
     pub num_games: u32,
     /// Search depth
     pub depth: u8,
+    /// Time limit per move in milliseconds (0 = no limit)
+    pub time_per_move_ms: u64,
     /// Is tournament running?
     pub running: bool,
     /// Current progress (games completed)
@@ -92,6 +94,7 @@ impl TournamentState {
             engines,
             num_games: 10,
             depth: 4,
+            time_per_move_ms: 0,
             running: false,
             progress: 0,
             elo_tracker,
@@ -115,6 +118,7 @@ pub enum TournamentMessage {
     Engine2Selected(EngineOption),
     GamesChanged(String),
     DepthChanged(String),
+    TimePerMoveChanged(String),
     StartTournament,
     StopTournament,
     RefreshElo,
@@ -172,9 +176,19 @@ pub fn tournament_view(state: &TournamentState) -> Element<'_, TournamentMessage
         .on_input(TournamentMessage::DepthChanged)
         .width(80);
 
+    let time_display = if state.time_per_move_ms == 0 {
+        String::new()
+    } else {
+        state.time_per_move_ms.to_string()
+    };
+    let time_input = text_input("∞", &time_display)
+        .on_input(TournamentMessage::TimePerMoveChanged)
+        .width(80);
+
     let settings_row = row![
         column![text("Games").size(14), games_input,].spacing(5),
         column![text("Depth").size(14), depth_input,].spacing(5),
+        column![text("Time/move (ms)").size(14), time_input,].spacing(5),
     ]
     .spacing(20);
 

@@ -1,8 +1,16 @@
 //! Negamax search with alpha-beta pruning
 
-use chess_core::{legal_moves_into, Color, Move, Position};
+use chess_core::{legal_moves_into, Color, Move, Position, TimeControl};
 
 use crate::eval::evaluate;
+
+/// Result from pick_best_move indicating whether search completed or was stopped.
+pub struct SearchOutcome {
+    /// Best move found (if any legal moves exist)
+    pub best_move: Option<(Move, i32)>,
+    /// True if search was stopped early due to time
+    pub stopped: bool,
+}
 
 /// Computes a lightweight hash for repetition detection.
 fn position_key(pos: &Position) -> u64 {
@@ -44,40 +52,63 @@ fn position_key(pos: &Position) -> u64 {
 /// * `pos` - The position to search
 /// * `depth` - Maximum search depth in plies
 /// * `nodes` - Counter for nodes searched (for statistics)
+/// * `tc` - Time control for aborting search when time expires
 ///
 /// # Returns
-/// `Some((best_move, score))` or `None` if no legal moves
-pub fn pick_best_move(pos: &Position, depth: u8, nodes: &mut u64) -> Option<(Move, i32)> {
+/// `SearchOutcome` containing the best move (if any) and whether search was stopped
+pub fn pick_best_move(
+    pos: &Position,
+    depth: u8,
+    nodes: &mut u64,
+    tc: &TimeControl,
+) -> SearchOutcome {
     let mut tmp = pos.clone();
     let mut moves = Vec::with_capacity(64);
     legal_moves_into(&mut tmp, &mut moves);
 
     if moves.is_empty() {
-        return None;
+        return SearchOutcome {
+            best_move: None,
+            stopped: false,
+        };
     }
 
     let mut best = moves[0];
     let mut best_score = i32::MIN + 1;
+    let mut stopped = false;
 
     let mut history = Vec::with_capacity((depth as usize) + 1);
     history.push(position_key(&tmp));
 
     for mv in moves {
+        // Check time before starting each root move
+        if tc.should_check_time(*nodes) && tc.check_time() {
+            stopped = true;
+            break;
+        }
+
         let undo = tmp.make_move(mv);
         history.push(position_key(&tmp));
         *nodes += 1;
 
-        let score = -negamax(
+        let (score, was_stopped) = negamax(
             &mut tmp,
             depth.saturating_sub(1),
             i32::MIN / 2,
             i32::MAX / 2,
             &mut history,
             nodes,
+            tc,
         );
+        let score = -score;
 
         history.pop();
         tmp.unmake_move(mv, undo);
+
+        if was_stopped {
+            stopped = true;
+            break;
+        }
 
         if score > best_score {
             best_score = score;
@@ -85,10 +116,15 @@ pub fn pick_best_move(pos: &Position, depth: u8, nodes: &mut u64) -> Option<(Mov
         }
     }
 
-    Some((best, best_score))
+    SearchOutcome {
+        best_move: Some((best, best_score)),
+        stopped,
+    }
 }
 
 /// Recursive negamax search with alpha-beta pruning.
+///
+/// Returns (score, stopped) where stopped indicates if search was aborted due to time.
 fn negamax(
     pos: &mut Position,
     depth: u8,
@@ -96,16 +132,22 @@ fn negamax(
     beta: i32,
     history: &mut Vec<u64>,
     nodes: &mut u64,
-) -> i32 {
+    tc: &TimeControl,
+) -> (i32, bool) {
+    // Check time periodically
+    if tc.should_check_time(*nodes) && tc.check_time() {
+        return (0, true);
+    }
+
     // Immediate draw conditions
     if pos.halfmove_clock >= 100 {
-        return 0; // 50-move rule reached
+        return (0, false); // 50-move rule reached
     }
 
     let curr_key = *history.last().unwrap_or(&position_key(pos));
     let repeats = history.iter().filter(|&&k| k == curr_key).count();
     if repeats >= 3 {
-        return 0; // threefold repetition draw
+        return (0, false); // threefold repetition draw
     }
 
     let mut moves = Vec::with_capacity(64);
@@ -113,13 +155,13 @@ fn negamax(
 
     if moves.is_empty() {
         if pos.in_check(pos.side_to_move) {
-            return -100_000; // Checkmate
+            return (-100_000, false); // Checkmate
         }
-        return 0; // Stalemate
+        return (0, false); // Stalemate
     }
 
     if depth == 0 {
-        return evaluate(pos);
+        return (evaluate(pos), false);
     }
 
     let mut best = i32::MIN + 1;
@@ -129,10 +171,15 @@ fn negamax(
         history.push(position_key(pos));
         *nodes += 1;
 
-        let score = -negamax(pos, depth - 1, -beta, -alpha, history, nodes);
+        let (score, stopped) = negamax(pos, depth - 1, -beta, -alpha, history, nodes, tc);
+        let score = -score;
 
         history.pop();
         pos.unmake_move(mv, undo);
+
+        if stopped {
+            return (best, true);
+        }
 
         if score > best {
             best = score;
@@ -145,7 +192,7 @@ fn negamax(
         }
     }
 
-    best
+    (best, false)
 }
 
 #[cfg(test)]
@@ -157,8 +204,10 @@ mod tests {
     fn test_pick_best_move_start_position() {
         let pos = Position::startpos();
         let mut nodes = 0;
-        let result = pick_best_move(&pos, 3, &mut nodes);
-        assert!(result.is_some());
+        let tc = TimeControl::new(None);
+        tc.start();
+        let result = pick_best_move(&pos, 3, &mut nodes, &tc);
+        assert!(result.best_move.is_some());
         assert!(nodes > 0);
     }
 
@@ -167,7 +216,9 @@ mod tests {
         // Position where Qh7# is mate in one
         let pos = Position::from_fen("6k1/5ppp/8/8/8/8/5PPP/4Q1K1 w - - 0 1");
         let mut nodes = 0;
-        let result = pick_best_move(&pos, 2, &mut nodes);
-        assert!(result.is_some());
+        let tc = TimeControl::new(None);
+        tc.start();
+        let result = pick_best_move(&pos, 2, &mut nodes, &tc);
+        assert!(result.best_move.is_some());
     }
 }
