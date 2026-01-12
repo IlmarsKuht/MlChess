@@ -1,4 +1,12 @@
-use crate::{board::Position, types::*};
+//! Move generation using bitboards for maximum performance.
+//!
+//! This module generates pseudo-legal moves using bitboard operations,
+//! then filters out illegal moves by checking if the king is in check.
+
+use crate::attacks::{bishop_attacks, king_attacks, knight_attacks, queen_attacks, rook_attacks};
+use crate::bitboard::Bitboard;
+use crate::board::Position;
+use crate::types::*;
 
 /// Generate all legal moves, returning a freshly allocated vector.
 /// Internally delegates to `legal_moves_into`, cloning the position only once.
@@ -24,256 +32,328 @@ pub fn legal_moves_into(pos: &mut Position, out: &mut Vec<Move>) {
     });
 }
 
+/// Generate all pseudo-legal moves using bitboards.
 fn pseudo_moves(pos: &Position, out: &mut Vec<Move>) {
-    for sq in 0..64u8 {
-        let pc = match pos.piece_at(sq) {
-            Some(p) => p,
-            None => continue,
+    let us = pos.side_to_move;
+    let them = us.other();
+    let our_pieces = pos.bitboards.color(us);
+    let their_pieces = pos.bitboards.color(them);
+    let occupied = pos.bitboards.occupied();
+    let empty = !occupied;
+
+    // Generate moves for each piece type
+    gen_pawn_moves(pos, us, our_pieces, their_pieces, empty, out);
+    gen_knight_moves(pos, us, our_pieces, out);
+    gen_bishop_moves(pos, us, our_pieces, occupied, out);
+    gen_rook_moves(pos, us, our_pieces, occupied, out);
+    gen_queen_moves(pos, us, our_pieces, occupied, out);
+    gen_king_moves(pos, us, our_pieces, out);
+    gen_castling_moves(pos, us, occupied, out);
+}
+
+/// Type alias for bitboard shift functions.
+type ShiftFn = fn(Bitboard) -> Bitboard;
+
+/// Generate pawn moves (pushes, double pushes, captures, en passant, promotions).
+#[inline]
+fn gen_pawn_moves(
+    pos: &Position,
+    us: Color,
+    _our_pieces: Bitboard,
+    their_pieces: Bitboard,
+    empty: Bitboard,
+    out: &mut Vec<Move>,
+) {
+    let pawns = pos.bitboards.pieces(us, PieceKind::Pawn);
+
+    let (push_dir, start_rank, promo_rank, double_rank): (ShiftFn, Bitboard, Bitboard, Bitboard) =
+        match us {
+            Color::White => (
+                Bitboard::north,
+                Bitboard::RANK_2,
+                Bitboard::RANK_8,
+                Bitboard::RANK_4,
+            ),
+            Color::Black => (
+                Bitboard::south,
+                Bitboard::RANK_7,
+                Bitboard::RANK_1,
+                Bitboard::RANK_5,
+            ),
         };
-        if pc.color != pos.side_to_move {
-            continue;
+
+    let back_dir: i8 = match us {
+        Color::White => -8,
+        Color::Black => 8,
+    };
+
+    // Single pushes
+    let single_push = push_dir(pawns) & empty;
+
+    // Non-promotion pushes
+    let mut non_promo_push = single_push & !promo_rank;
+    while let Some(to) = non_promo_push.pop_lsb() {
+        let from = (to as i8 + back_dir) as u8;
+        out.push(Move::new(from, to));
+    }
+
+    // Promotion pushes
+    let mut promo_push = single_push & promo_rank;
+    while let Some(to) = promo_push.pop_lsb() {
+        let from = (to as i8 + back_dir) as u8;
+        add_promotions(from, to, out);
+    }
+
+    // Double pushes
+    let can_double = pawns & start_rank;
+    let first_push = push_dir(can_double) & empty;
+    let mut double_push = push_dir(first_push) & empty & double_rank;
+    while let Some(to) = double_push.pop_lsb() {
+        let from = (to as i8 + 2 * back_dir) as u8;
+        out.push(Move::new(from, to));
+    }
+
+    // Captures
+    let (attack_left, attack_right): (ShiftFn, ShiftFn) = match us {
+        Color::White => (Bitboard::north_west, Bitboard::north_east),
+        Color::Black => (Bitboard::south_west, Bitboard::south_east),
+    };
+
+    let (back_left, back_right): (i8, i8) = match us {
+        Color::White => (-7, -9),
+        Color::Black => (9, 7),
+    };
+
+    // Left captures
+    let mut left_captures = attack_left(pawns) & their_pieces & !promo_rank;
+    while let Some(to) = left_captures.pop_lsb() {
+        let from = (to as i8 + back_left) as u8;
+        out.push(Move::new(from, to));
+    }
+    let mut left_promo_captures = attack_left(pawns) & their_pieces & promo_rank;
+    while let Some(to) = left_promo_captures.pop_lsb() {
+        let from = (to as i8 + back_left) as u8;
+        add_promotions(from, to, out);
+    }
+
+    // Right captures
+    let mut right_captures = attack_right(pawns) & their_pieces & !promo_rank;
+    while let Some(to) = right_captures.pop_lsb() {
+        let from = (to as i8 + back_right) as u8;
+        out.push(Move::new(from, to));
+    }
+    let mut right_promo_captures = attack_right(pawns) & their_pieces & promo_rank;
+    while let Some(to) = right_promo_captures.pop_lsb() {
+        let from = (to as i8 + back_right) as u8;
+        add_promotions(from, to, out);
+    }
+
+    // En passant
+    if let Some(ep_sq) = pos.en_passant {
+        let ep_bb = Bitboard::from_square(ep_sq);
+
+        // Check pawns that can capture en passant
+        if !(attack_left(pawns) & ep_bb).is_empty() {
+            let from = (ep_sq as i8 + back_left) as u8;
+            let mut mv = Move::new(from, ep_sq);
+            mv.is_en_passant = true;
+            out.push(mv);
         }
-        match pc.kind {
-            PieceKind::Pawn => gen_pawn(pos, sq, pc.color, out),
-            PieceKind::Knight => gen_knight(pos, sq, pc.color, out),
-            PieceKind::Bishop => gen_slider(
-                pos,
-                sq,
-                pc.color,
-                out,
-                &[(1, 1), (1, -1), (-1, 1), (-1, -1)],
-            ),
-            PieceKind::Rook => {
-                gen_slider(pos, sq, pc.color, out, &[(1, 0), (-1, 0), (0, 1), (0, -1)])
-            }
-            PieceKind::Queen => gen_slider(
-                pos,
-                sq,
-                pc.color,
-                out,
-                &[
-                    (1, 1),
-                    (1, -1),
-                    (-1, 1),
-                    (-1, -1),
-                    (1, 0),
-                    (-1, 0),
-                    (0, 1),
-                    (0, -1),
-                ],
-            ),
-            PieceKind::King => {
-                gen_king(pos, sq, pc.color, out);
-                gen_castle(pos, sq, pc.color, out);
-            }
+        if !(attack_right(pawns) & ep_bb).is_empty() {
+            let from = (ep_sq as i8 + back_right) as u8;
+            let mut mv = Move::new(from, ep_sq);
+            mv.is_en_passant = true;
+            out.push(mv);
         }
     }
 }
 
-fn gen_pawn(pos: &Position, from: u8, c: Color, out: &mut Vec<Move>) {
-    let f = file_of(from);
-    let r = rank_of(from);
+#[inline]
+fn add_promotions(from: u8, to: u8, out: &mut Vec<Move>) {
+    for pk in [
+        PieceKind::Queen,
+        PieceKind::Rook,
+        PieceKind::Bishop,
+        PieceKind::Knight,
+    ] {
+        let mut mv = Move::new(from, to);
+        mv.promo = Some(pk);
+        out.push(mv);
+    }
+}
 
-    let dir: i8 = match c {
-        Color::White => 1,
-        Color::Black => -1,
-    };
-    let start_rank: i8 = match c {
-        Color::White => 1,
-        Color::Black => 6,
-    };
-    let promo_rank: i8 = match c {
-        Color::White => 7,
-        Color::Black => 0,
-    };
+/// Generate knight moves using pre-computed attack tables.
+#[inline]
+fn gen_knight_moves(pos: &Position, us: Color, our_pieces: Bitboard, out: &mut Vec<Move>) {
+    let mut knights = pos.bitboards.pieces(us, PieceKind::Knight);
 
-    // forward 1
-    if let Some(to) = sq(f, r + dir)
-        && pos.piece_at(to).is_none()
-    {
-        if rank_of(to) == promo_rank {
-            for pk in [
-                PieceKind::Queen,
-                PieceKind::Rook,
-                PieceKind::Bishop,
-                PieceKind::Knight,
-            ] {
-                let mut mv = Move::new(from, to);
-                mv.promo = Some(pk);
-                out.push(mv);
-            }
-        } else {
+    while let Some(from) = knights.pop_lsb() {
+        let attacks = knight_attacks(from) & !our_pieces;
+        let mut targets = attacks;
+        while let Some(to) = targets.pop_lsb() {
             out.push(Move::new(from, to));
         }
-
-        // forward 2 from start
-        if r == start_rank
-            && let Some(to2) = sq(f, r + 2 * dir)
-            && pos.piece_at(to2).is_none()
-        {
-            out.push(Move::new(from, to2));
-        }
     }
+}
 
-    // captures + en-passant
-    for df in [-1, 1] {
-        if let Some(to) = sq(f + df, r + dir) {
-            if let Some(tpc) = pos.piece_at(to) {
-                if tpc.color != c {
-                    if rank_of(to) == promo_rank {
-                        for pk in [
-                            PieceKind::Queen,
-                            PieceKind::Rook,
-                            PieceKind::Bishop,
-                            PieceKind::Knight,
-                        ] {
-                            let mut mv = Move::new(from, to);
-                            mv.promo = Some(pk);
-                            out.push(mv);
-                        }
-                    } else {
-                        out.push(Move::new(from, to));
-                    }
-                }
-            } else if pos.en_passant == Some(to) {
-                let mut mv = Move::new(from, to);
-                mv.is_en_passant = true;
-                out.push(mv);
-            }
+/// Generate bishop moves using ray attacks.
+#[inline]
+fn gen_bishop_moves(
+    pos: &Position,
+    us: Color,
+    our_pieces: Bitboard,
+    occupied: Bitboard,
+    out: &mut Vec<Move>,
+) {
+    let mut bishops = pos.bitboards.pieces(us, PieceKind::Bishop);
+
+    while let Some(from) = bishops.pop_lsb() {
+        let attacks = bishop_attacks(from, occupied) & !our_pieces;
+        let mut targets = attacks;
+        while let Some(to) = targets.pop_lsb() {
+            out.push(Move::new(from, to));
         }
     }
 }
 
-fn gen_knight(pos: &Position, from: u8, c: Color, out: &mut Vec<Move>) {
-    let f = file_of(from);
-    let r = rank_of(from);
-    let deltas = [
-        (1, 2),
-        (2, 1),
-        (-1, 2),
-        (-2, 1),
-        (1, -2),
-        (2, -1),
-        (-1, -2),
-        (-2, -1),
-    ];
-    for (df, dr) in deltas {
-        if let Some(to) = sq(f + df, r + dr) {
-            match pos.piece_at(to) {
-                None => out.push(Move::new(from, to)),
-                Some(pc) if pc.color != c => out.push(Move::new(from, to)),
-                _ => {}
-            }
+/// Generate rook moves using ray attacks.
+#[inline]
+fn gen_rook_moves(
+    pos: &Position,
+    us: Color,
+    our_pieces: Bitboard,
+    occupied: Bitboard,
+    out: &mut Vec<Move>,
+) {
+    let mut rooks = pos.bitboards.pieces(us, PieceKind::Rook);
+
+    while let Some(from) = rooks.pop_lsb() {
+        let attacks = rook_attacks(from, occupied) & !our_pieces;
+        let mut targets = attacks;
+        while let Some(to) = targets.pop_lsb() {
+            out.push(Move::new(from, to));
         }
     }
 }
 
-fn gen_slider(pos: &Position, from: u8, c: Color, out: &mut Vec<Move>, dirs: &[(i8, i8)]) {
-    let f0 = file_of(from);
-    let r0 = rank_of(from);
-    for (df, dr) in dirs {
-        let mut f = f0 + df;
-        let mut r = r0 + dr;
-        while let Some(to) = sq(f, r) {
-            match pos.piece_at(to) {
-                None => out.push(Move::new(from, to)),
-                Some(pc) if pc.color != c => {
-                    out.push(Move::new(from, to));
-                    break;
-                }
-                _ => break,
-            }
-            f += df;
-            r += dr;
+/// Generate queen moves using combined ray attacks.
+#[inline]
+fn gen_queen_moves(
+    pos: &Position,
+    us: Color,
+    our_pieces: Bitboard,
+    occupied: Bitboard,
+    out: &mut Vec<Move>,
+) {
+    let mut queens = pos.bitboards.pieces(us, PieceKind::Queen);
+
+    while let Some(from) = queens.pop_lsb() {
+        let attacks = queen_attacks(from, occupied) & !our_pieces;
+        let mut targets = attacks;
+        while let Some(to) = targets.pop_lsb() {
+            out.push(Move::new(from, to));
         }
     }
 }
 
-fn gen_king(pos: &Position, from: u8, c: Color, out: &mut Vec<Move>) {
-    let f = file_of(from);
-    let r = rank_of(from);
-    let deltas = [
-        (1, 1),
-        (1, 0),
-        (1, -1),
-        (0, 1),
-        (0, -1),
-        (-1, 1),
-        (-1, 0),
-        (-1, -1),
-    ];
-    for (df, dr) in deltas {
-        if let Some(to) = sq(f + df, r + dr) {
-            match pos.piece_at(to) {
-                None => out.push(Move::new(from, to)),
-                Some(pc) if pc.color != c => out.push(Move::new(from, to)),
-                _ => {}
-            }
+/// Generate king moves using pre-computed attack tables.
+#[inline]
+fn gen_king_moves(pos: &Position, us: Color, our_pieces: Bitboard, out: &mut Vec<Move>) {
+    let mut kings = pos.bitboards.pieces(us, PieceKind::King);
+
+    while let Some(from) = kings.pop_lsb() {
+        let attacks = king_attacks(from) & !our_pieces;
+        let mut targets = attacks;
+        while let Some(to) = targets.pop_lsb() {
+            out.push(Move::new(from, to));
         }
     }
 }
 
-fn gen_castle(pos: &Position, from: u8, c: Color, out: &mut Vec<Move>) {
-    // Must be on original king square
-    let (king_from, wk, wq, bk, bq) = match c {
-        Color::White => (4u8, pos.castling.wk, pos.castling.wq, false, false),
-        Color::Black => (60u8, false, false, pos.castling.bk, pos.castling.bq),
-    };
-    if from != king_from {
+/// Generate castling moves.
+#[inline]
+fn gen_castling_moves(pos: &Position, us: Color, occupied: Bitboard, out: &mut Vec<Move>) {
+    // Can't castle out of check
+    if pos.in_check(us) {
         return;
     }
 
-    // Can't castle out of/through check: check squares must not be attacked.
-    if pos.in_check(c) {
-        return;
+    let enemy = us.other();
+
+    match us {
+        Color::White => {
+            // King side: e1 -> g1, f1 and g1 must be empty, f1 and g1 not attacked
+            if pos.castling.wk {
+                let path_clear = (occupied & Bitboard(0x60)).is_empty(); // f1, g1
+                if path_clear
+                    && !pos.is_square_attacked(5, enemy)
+                    && !pos.is_square_attacked(6, enemy)
+                {
+                    let mut mv = Move::new(4, 6);
+                    mv.is_castle = true;
+                    out.push(mv);
+                }
+            }
+            // Queen side: e1 -> c1, b1, c1, d1 must be empty, c1 and d1 not attacked
+            if pos.castling.wq {
+                let path_clear = (occupied & Bitboard(0x0E)).is_empty(); // b1, c1, d1
+                if path_clear
+                    && !pos.is_square_attacked(2, enemy)
+                    && !pos.is_square_attacked(3, enemy)
+                {
+                    let mut mv = Move::new(4, 2);
+                    mv.is_castle = true;
+                    out.push(mv);
+                }
+            }
+        }
+        Color::Black => {
+            // King side: e8 -> g8
+            if pos.castling.bk {
+                let path_clear = (occupied & Bitboard(0x6000000000000000)).is_empty(); // f8, g8
+                if path_clear
+                    && !pos.is_square_attacked(61, enemy)
+                    && !pos.is_square_attacked(62, enemy)
+                {
+                    let mut mv = Move::new(60, 62);
+                    mv.is_castle = true;
+                    out.push(mv);
+                }
+            }
+            // Queen side: e8 -> c8
+            if pos.castling.bq {
+                let path_clear = (occupied & Bitboard(0x0E00000000000000)).is_empty(); // b8, c8, d8
+                if path_clear
+                    && !pos.is_square_attacked(58, enemy)
+                    && !pos.is_square_attacked(59, enemy)
+                {
+                    let mut mv = Move::new(60, 58);
+                    mv.is_castle = true;
+                    out.push(mv);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_startpos_moves() {
+        let pos = Position::startpos();
+        let moves = legal_moves(&pos);
+        // Starting position has 20 legal moves
+        assert_eq!(moves.len(), 20);
     }
 
-    let enemy = c.other();
-    if c == Color::White {
-        // King side: e1->g1, squares f1,g1 empty and not attacked on f1,g1
-        if wk
-            && pos.piece_at(5).is_none()
-            && pos.piece_at(6).is_none()
-            && !pos.is_square_attacked(5, enemy)
-            && !pos.is_square_attacked(6, enemy)
-        {
-            let mut mv = Move::new(4, 6);
-            mv.is_castle = true;
-            out.push(mv);
-        }
-        // Queen side: e1->c1, squares d1,c1,b1 empty; d1,c1 not attacked
-        if wq
-            && pos.piece_at(3).is_none()
-            && pos.piece_at(2).is_none()
-            && pos.piece_at(1).is_none()
-            && !pos.is_square_attacked(3, enemy)
-            && !pos.is_square_attacked(2, enemy)
-        {
-            let mut mv = Move::new(4, 2);
-            mv.is_castle = true;
-            out.push(mv);
-        }
-    } else {
-        if bk
-            && pos.piece_at(61).is_none()
-            && pos.piece_at(62).is_none()
-            && !pos.is_square_attacked(61, enemy)
-            && !pos.is_square_attacked(62, enemy)
-        {
-            let mut mv = Move::new(60, 62);
-            mv.is_castle = true;
-            out.push(mv);
-        }
-        if bq
-            && pos.piece_at(59).is_none()
-            && pos.piece_at(58).is_none()
-            && pos.piece_at(57).is_none()
-            && !pos.is_square_attacked(59, enemy)
-            && !pos.is_square_attacked(58, enemy)
-        {
-            let mut mv = Move::new(60, 58);
-            mv.is_castle = true;
-            out.push(mv);
-        }
+    #[test]
+    fn test_kiwipete_moves() {
+        // Kiwipete position - complex with many move types
+        let pos =
+            Position::from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq -");
+        let moves = legal_moves(&pos);
+        assert_eq!(moves.len(), 48);
     }
 }

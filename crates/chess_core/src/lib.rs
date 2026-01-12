@@ -1,3 +1,5 @@
+pub mod attacks;
+pub mod bitboard;
 pub mod board;
 pub mod movegen;
 pub mod perft;
@@ -6,6 +8,8 @@ pub mod types;
 pub mod uci;
 
 // Re-export core game logic (not engine-specific)
+pub use attacks::*;
+pub use bitboard::*;
 pub use board::*;
 pub use movegen::*;
 pub use perft::perft;

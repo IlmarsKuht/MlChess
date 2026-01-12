@@ -15,3 +15,25 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.8"
 rand = "0.8"
+
+# ============================================================================
+# Profiling Configuration
+# ============================================================================
+# These profiles enable effective profiling with cargo-flamegraph while
+# maintaining enough debug info for meaningful stack traces.
+
+# Release profile with debug symbols for profiling
+[profile.release]
+debug = true  # Keep debug symbols for flamegraph stack traces
+
+# Custom profile for maximum performance profiling
+# Use with: cargo flamegraph --profile profiling
+[profile.profiling]
+inherits = "release"
+debug = true
+lto = "thin"              # Link-time optimization for realistic performance
+codegen-units = 1         # Single codegen unit for better optimization
+
+# Bench profile for criterion benchmarks
+[profile.bench]
+debug = true

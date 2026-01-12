@@ -4,12 +4,14 @@ pub enum Color {
     Black,
 }
 impl Color {
+    #[inline(always)]
     pub fn other(self) -> Color {
         match self {
             Color::White => Color::Black,
             Color::Black => Color::White,
         }
     }
+    #[inline(always)]
     pub fn idx(self) -> usize {
         match self {
             Color::White => 0,
@@ -26,6 +28,29 @@ pub enum PieceKind {
     Rook,
     Queen,
     King,
+}
+
+impl PieceKind {
+    #[inline(always)]
+    pub const fn idx(self) -> usize {
+        match self {
+            PieceKind::Pawn => 0,
+            PieceKind::Knight => 1,
+            PieceKind::Bishop => 2,
+            PieceKind::Rook => 3,
+            PieceKind::Queen => 4,
+            PieceKind::King => 5,
+        }
+    }
+
+    pub const ALL: [PieceKind; 6] = [
+        PieceKind::Pawn,
+        PieceKind::Knight,
+        PieceKind::Bishop,
+        PieceKind::Rook,
+        PieceKind::Queen,
+        PieceKind::King,
+    ];
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,18 +81,28 @@ impl Move {
 }
 
 // Helpers
-pub fn file_of(sq: u8) -> i8 {
+#[inline(always)]
+pub const fn file_of(sq: u8) -> i8 {
     (sq % 8) as i8
 }
-pub fn rank_of(sq: u8) -> i8 {
+
+#[inline(always)]
+pub const fn rank_of(sq: u8) -> i8 {
     (sq / 8) as i8
 }
-pub fn sq(file: i8, rank: i8) -> Option<u8> {
-    if (0..8).contains(&file) && (0..8).contains(&rank) {
+
+#[inline(always)]
+pub const fn sq(file: i8, rank: i8) -> Option<u8> {
+    if file >= 0 && file < 8 && rank >= 0 && rank < 8 {
         Some((rank as u8) * 8 + (file as u8))
     } else {
         None
     }
+}
+
+#[inline(always)]
+pub const fn sq_from_coords(file: u8, rank: u8) -> u8 {
+    rank * 8 + file
 }
 
 pub fn sq_to_coord(sq: u8) -> String {

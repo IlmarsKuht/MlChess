@@ -1,6 +1,8 @@
+use crate::attacks::{bishop_attacks, king_attacks, knight_attacks, pawn_attacks, rook_attacks};
+use crate::bitboard::Bitboard;
 use crate::types::*;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CastlingRights {
     pub wk: bool,
     pub wq: bool,
@@ -8,9 +10,66 @@ pub struct CastlingRights {
     pub bq: bool,
 }
 
+/// Piece bitboards indexed by [color][piece_kind].
+/// Color: 0 = White, 1 = Black
+/// PieceKind: 0 = Pawn, 1 = Knight, 2 = Bishop, 3 = Rook, 4 = Queen, 5 = King
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PieceBitboards {
+    pub by_color: [Bitboard; 2],      // All pieces by color
+    pub by_piece: [[Bitboard; 6]; 2], // Pieces by [color][kind]
+}
+
+impl Default for PieceBitboards {
+    fn default() -> Self {
+        Self {
+            by_color: [Bitboard::EMPTY; 2],
+            by_piece: [[Bitboard::EMPTY; 6]; 2],
+        }
+    }
+}
+
+impl PieceBitboards {
+    #[inline(always)]
+    pub fn occupied(&self) -> Bitboard {
+        self.by_color[0] | self.by_color[1]
+    }
+
+    #[inline(always)]
+    pub fn empty(&self) -> Bitboard {
+        !self.occupied()
+    }
+
+    #[inline(always)]
+    pub fn set(&mut self, sq: u8, piece: Piece) {
+        let color_idx = piece.color.idx();
+        let kind_idx = piece.kind.idx();
+        self.by_color[color_idx].set(sq);
+        self.by_piece[color_idx][kind_idx].set(sq);
+    }
+
+    #[inline(always)]
+    pub fn clear(&mut self, sq: u8, piece: Piece) {
+        let color_idx = piece.color.idx();
+        let kind_idx = piece.kind.idx();
+        self.by_color[color_idx].clear(sq);
+        self.by_piece[color_idx][kind_idx].clear(sq);
+    }
+
+    #[inline(always)]
+    pub fn pieces(&self, color: Color, kind: PieceKind) -> Bitboard {
+        self.by_piece[color.idx()][kind.idx()]
+    }
+
+    #[inline(always)]
+    pub fn color(&self, color: Color) -> Bitboard {
+        self.by_color[color.idx()]
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Position {
     pub board: [Option<Piece>; 64],
+    pub bitboards: PieceBitboards,
     pub side_to_move: Color,
     pub castling: CastlingRights,
     pub en_passant: Option<u8>, // square behind a pawn that just advanced 2
@@ -34,6 +93,7 @@ impl Position {
     pub fn startpos() -> Self {
         let mut p = Position {
             board: [None; 64],
+            bitboards: PieceBitboards::default(),
             side_to_move: Color::White,
             castling: CastlingRights {
                 wk: true,
@@ -48,14 +108,20 @@ impl Position {
 
         // Pawns
         for f in 0..8 {
-            p.board[8 + f] = Some(Piece {
-                color: Color::White,
-                kind: PieceKind::Pawn,
-            });
-            p.board[48 + f] = Some(Piece {
-                color: Color::Black,
-                kind: PieceKind::Pawn,
-            });
+            p.set_piece(
+                8 + f,
+                Some(Piece {
+                    color: Color::White,
+                    kind: PieceKind::Pawn,
+                }),
+            );
+            p.set_piece(
+                48 + f,
+                Some(Piece {
+                    color: Color::Black,
+                    kind: PieceKind::Pawn,
+                }),
+            );
         }
         // Back ranks
         let back = [
@@ -69,14 +135,20 @@ impl Position {
             PieceKind::Rook,
         ];
         for (f, &kind) in back.iter().enumerate() {
-            p.board[f] = Some(Piece {
-                color: Color::White,
-                kind,
-            });
-            p.board[56 + f] = Some(Piece {
-                color: Color::Black,
-                kind,
-            });
+            p.set_piece(
+                f as u8,
+                Some(Piece {
+                    color: Color::White,
+                    kind,
+                }),
+            );
+            p.set_piece(
+                56 + f as u8,
+                Some(Piece {
+                    color: Color::Black,
+                    kind,
+                }),
+            );
         }
         p
     }
@@ -164,8 +236,17 @@ impl Position {
             .parse()
             .expect("Invalid fullmove number in FEN");
 
+        // Build bitboards from the mailbox board
+        let mut bitboards = PieceBitboards::default();
+        for sq in 0..64u8 {
+            if let Some(piece) = board[sq as usize] {
+                bitboards.set(sq, piece);
+            }
+        }
+
         Position {
             board,
+            bitboards,
             side_to_move,
             castling,
             en_passant,
@@ -174,25 +255,33 @@ impl Position {
         }
     }
 
+    /// Get the king square for a color using bitboards (O(1)).
+    #[inline(always)]
     pub fn king_sq(&self, c: Color) -> Option<u8> {
-        for i in 0..64 {
-            if let Some(pc) = self.board[i]
-                && pc.color == c
-                && pc.kind == PieceKind::King
-            {
-                return Some(i as u8);
-            }
-        }
-        None
+        self.bitboards.pieces(c, PieceKind::King).lsb()
     }
 
+    #[inline(always)]
     pub fn piece_at(&self, sq: u8) -> Option<Piece> {
         self.board[sq as usize]
     }
+
+    /// Set a piece on the board, updating both mailbox and bitboards.
+    #[inline(always)]
     pub fn set_piece(&mut self, sq: u8, pc: Option<Piece>) {
+        // Clear old piece from bitboards if any
+        if let Some(old) = self.board[sq as usize] {
+            self.bitboards.clear(sq, old);
+        }
+        // Set new piece in bitboards if any
+        if let Some(new) = pc {
+            self.bitboards.set(sq, new);
+        }
         self.board[sq as usize] = pc;
     }
 
+    /// Check if a color's king is in check using bitboard attacks.
+    #[inline]
     pub fn in_check(&self, c: Color) -> bool {
         let ksq = match self.king_sq(c) {
             Some(s) => s,
@@ -201,7 +290,48 @@ impl Position {
         self.is_square_attacked(ksq, c.other())
     }
 
+    /// Check if a square is attacked by a given color using bitboard lookups.
+    #[inline]
     pub fn is_square_attacked(&self, target: u8, by: Color) -> bool {
+        let occupied = self.bitboards.occupied();
+
+        // Pawn attacks: check if any enemy pawn attacks this square
+        // We look at squares that could attack 'target' - i.e., where a pawn of 'by' would be
+        let pawn_attackers = pawn_attacks(target, by != Color::White);
+        if !(pawn_attackers & self.bitboards.pieces(by, PieceKind::Pawn)).is_empty() {
+            return true;
+        }
+
+        // Knight attacks
+        if !(knight_attacks(target) & self.bitboards.pieces(by, PieceKind::Knight)).is_empty() {
+            return true;
+        }
+
+        // King attacks
+        if !(king_attacks(target) & self.bitboards.pieces(by, PieceKind::King)).is_empty() {
+            return true;
+        }
+
+        // Bishop/Queen diagonal attacks
+        let bishop_queen = self.bitboards.pieces(by, PieceKind::Bishop)
+            | self.bitboards.pieces(by, PieceKind::Queen);
+        if !(bishop_attacks(target, occupied) & bishop_queen).is_empty() {
+            return true;
+        }
+
+        // Rook/Queen orthogonal attacks
+        let rook_queen = self.bitboards.pieces(by, PieceKind::Rook)
+            | self.bitboards.pieces(by, PieceKind::Queen);
+        if !(rook_attacks(target, occupied) & rook_queen).is_empty() {
+            return true;
+        }
+
+        false
+    }
+
+    /// Legacy is_square_attacked using mailbox (for reference, can be removed later)
+    #[allow(dead_code)]
+    fn is_square_attacked_mailbox(&self, target: u8, by: Color) -> bool {
         // Pawn attacks
         let tf = file_of(target);
         let tr = rank_of(target);
@@ -305,7 +435,7 @@ impl Position {
         let to = mv.to;
         let moved = self.piece_at(from).expect("no piece on from-square");
         let mut captured = self.piece_at(to);
-        let prev_castling = self.castling.clone();
+        let prev_castling = self.castling;
         let prev_ep = self.en_passant;
         let prev_hmc = self.halfmove_clock;
         let prev_fmn = self.fullmove_number;
