@@ -158,7 +158,7 @@ pub enum Message {
     ClockTick,
 
     // Tournament
-    Tournament(TournamentMessage),
+    Tournament(Box<TournamentMessage>),
 
     // Application
     Quit,
@@ -239,7 +239,7 @@ impl ChessApp {
                     time_per_move_ms,
                     progress,
                 )
-                .map(Message::Tournament),
+                .map(|msg| Message::Tournament(Box::new(msg))),
             );
         }
 
@@ -355,7 +355,7 @@ impl ChessApp {
                 Task::none()
             }
 
-            Message::Tournament(msg) => self.handle_tournament_message(msg),
+            Message::Tournament(msg) => self.handle_tournament_message(*msg),
 
             Message::Quit => {
                 std::process::exit(0);
@@ -475,7 +475,7 @@ impl ChessApp {
                 last_move,
                 game_info,
             } => {
-                self.tournament.live_position = position;
+                self.tournament.live_position = *position;
                 self.tournament.live_last_move = last_move;
                 self.tournament.live_game_info = game_info;
                 // Continue running the tournament - this message is followed by another task
@@ -515,9 +515,8 @@ impl ChessApp {
 
         let content: Element<'_, Message> = match self.tab {
             Tab::Play => self.play_view(),
-            Tab::Tournament => {
-                tournament_view::tournament_view(&self.tournament).map(Message::Tournament)
-            }
+            Tab::Tournament => tournament_view::tournament_view(&self.tournament)
+                .map(|msg| Message::Tournament(Box::new(msg))),
         };
 
         column![header, horizontal_rule(2), content,].into()
@@ -881,9 +880,12 @@ fn tournament_subscription(
                         engine1.new_game();
                         engine2.new_game();
 
+                        // Track position hashes for threefold repetition detection
+                        let mut position_history = vec![pos.position_hash()];
+
                         // Send initial position
                         let _ = tx.blocking_send(TournamentMessage::PositionUpdate {
-                            position: pos.clone(),
+                            position: Box::new(pos.clone()),
                             last_move: None,
                             game_info: game_info.clone(),
                         });
@@ -920,9 +922,12 @@ fn tournament_subscription(
                                     let to = mv.to;
                                     pos.make_move(mv);
 
+                                    // Track position hash for repetition detection
+                                    position_history.push(pos.position_hash());
+
                                     // Send position update
                                     let _ = tx.blocking_send(TournamentMessage::PositionUpdate {
-                                        position: pos.clone(),
+                                        position: Box::new(pos.clone()),
                                         last_move: Some((from, to)),
                                         game_info: game_info.clone(),
                                     });
@@ -937,7 +942,27 @@ fn tournament_subscription(
                             let mut moves = Vec::new();
                             let mut test_pos = pos.clone();
                             legal_moves_into(&mut test_pos, &mut moves);
-                            if moves.is_empty() || pos.halfmove_clock >= 100 {
+                            if moves.is_empty() {
+                                break;
+                            }
+
+                            // Check for fifty-move rule
+                            if pos.halfmove_clock >= 100 {
+                                break;
+                            }
+
+                            // Check for threefold repetition
+                            let current_hash = pos.position_hash();
+                            let repetition_count = position_history
+                                .iter()
+                                .filter(|&&h| h == current_hash)
+                                .count();
+                            if repetition_count >= 3 {
+                                break;
+                            }
+
+                            // Check for insufficient material
+                            if pos.is_insufficient_material() {
                                 break;
                             }
                         }
@@ -957,8 +982,22 @@ fn tournament_subscription(
                             } else {
                                 "1/2-1/2 (Stalemate)"
                             }
+                        } else if pos.halfmove_clock >= 100 {
+                            "1/2-1/2 (50-move rule)"
+                        } else if pos.is_insufficient_material() {
+                            "1/2-1/2 (Insufficient material)"
                         } else {
-                            "1/2-1/2 (Draw)"
+                            // Must be threefold repetition or max moves
+                            let current_hash = pos.position_hash();
+                            let repetition_count = position_history
+                                .iter()
+                                .filter(|&&h| h == current_hash)
+                                .count();
+                            if repetition_count >= 3 {
+                                "1/2-1/2 (Threefold repetition)"
+                            } else {
+                                "1/2-1/2 (Max moves)"
+                            }
                         };
 
                         let _ = tx.blocking_send(TournamentMessage::GameFinished {

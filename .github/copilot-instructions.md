@@ -19,6 +19,14 @@ Purpose
 
 4. **Complete implementations only.** When adding new features, implement them fully. Do not create stub functions, placeholder implementations, or scaffolding that doesn't work.
 
+5. **FIX ALL WARNINGS AND ERRORS — NO EXCEPTIONS.** When you run `cargo build`, `cargo clippy`, or `cargo test`, you MUST fix EVERY warning and error you see — regardless of whether you caused it or it was pre-existing. Do NOT say "this warning is unrelated to my changes" or "this was already there". If you see it, you fix it. Period. This applies to:
+   - Clippy lints (large_enum_variant, unused variables, etc.)
+   - Compiler warnings (dead code, unused imports, etc.)
+   - Test failures
+   - Any other diagnostic output
+   
+   **The codebase must be warning-free at all times.**
+
 ### Before Completing Any Work
 
 1. Run `cargo build --workspace` — fix ALL warnings

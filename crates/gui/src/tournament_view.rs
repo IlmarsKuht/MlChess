@@ -125,7 +125,7 @@ pub enum TournamentMessage {
     ToggleWatchLive,
     /// Position update from running tournament
     PositionUpdate {
-        position: Position,
+        position: Box<Position>,
         last_move: Option<(u8, u8)>,
         game_info: String,
     },
