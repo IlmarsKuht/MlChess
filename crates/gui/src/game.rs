@@ -266,8 +266,8 @@ impl GameState {
             legal_moves_into(&mut pos, &mut moves);
 
             for mv in moves {
-                if mv.from == from {
-                    self.legal_moves_from_selected.insert(mv.to);
+                if mv.from() == from {
+                    self.legal_moves_from_selected.insert(mv.to());
                 }
             }
         }
@@ -281,7 +281,7 @@ impl GameState {
 
         // Find the matching move (handle promotions - default to queen)
         let mv = moves.iter().find(|m| {
-            m.from == from && m.to == to && (m.promo.is_none() || m.promo == Some(PieceKind::Queen))
+            m.from() == from && m.to() == to && (m.promo().is_none() || m.promo() == Some(PieceKind::Queen))
         });
 
         if let Some(&mv) = mv {
@@ -299,7 +299,7 @@ impl GameState {
 
         self.position.make_move(mv);
         self.moves.push(MoveRecord { san });
-        self.last_move = Some((mv.from, mv.to));
+        self.last_move = Some((mv.from(), mv.to()));
         self.selected_square = None;
         self.legal_moves_from_selected.clear();
 
@@ -315,15 +315,15 @@ impl GameState {
 
     /// Generate SAN notation for a move
     fn generate_san(&self, mv: Move) -> String {
-        let piece = self.position.piece_at(mv.from);
+        let piece = self.position.piece_at(mv.from());
         if piece.is_none() {
-            return format!("{}{}", sq_name(mv.from), sq_name(mv.to));
+            return format!("{}{}", sq_name(mv.from()), sq_name(mv.to()));
         }
         let piece = piece.unwrap();
 
         // Castling
-        if mv.is_castle {
-            if mv.to > mv.from {
+        if mv.is_castle() {
+            if mv.to() > mv.from() {
                 return "O-O".to_string();
             } else {
                 return "O-O-O".to_string();
@@ -343,19 +343,19 @@ impl GameState {
         }
 
         // Capture indicator
-        let is_capture = self.position.piece_at(mv.to).is_some() || mv.is_en_passant;
+        let is_capture = self.position.piece_at(mv.to()).is_some() || mv.is_en_passant();
         if is_capture {
             if piece.kind == PieceKind::Pawn {
-                san.push((b'a' + (mv.from % 8)) as char);
+                san.push((b'a' + (mv.from() % 8)) as char);
             }
             san.push('x');
         }
 
         // Destination square
-        san.push_str(&sq_name(mv.to));
+        san.push_str(&sq_name(mv.to()));
 
         // Promotion
-        if let Some(promo) = mv.promo {
+        if let Some(promo) = mv.promo() {
             san.push('=');
             san.push(match promo {
                 PieceKind::Queen => 'Q',

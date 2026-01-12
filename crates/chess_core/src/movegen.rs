@@ -156,13 +156,13 @@ fn gen_pawn_moves(
         if !(attack_left(pawns) & ep_bb).is_empty() {
             let from = (ep_sq as i8 + back_left) as u8;
             let mut mv = Move::new(from, ep_sq);
-            mv.is_en_passant = true;
+            mv.set_en_passant(true);
             out.push(mv);
         }
         if !(attack_right(pawns) & ep_bb).is_empty() {
             let from = (ep_sq as i8 + back_right) as u8;
             let mut mv = Move::new(from, ep_sq);
-            mv.is_en_passant = true;
+            mv.set_en_passant(true);
             out.push(mv);
         }
     }
@@ -177,7 +177,7 @@ fn add_promotions(from: u8, to: u8, out: &mut Vec<Move>) {
         PieceKind::Knight,
     ] {
         let mut mv = Move::new(from, to);
-        mv.promo = Some(pk);
+        mv.set_promo(Some(pk));
         out.push(mv);
     }
 }
@@ -290,7 +290,7 @@ fn gen_castling_moves(pos: &Position, us: Color, occupied: Bitboard, out: &mut V
                     && !pos.is_square_attacked(6, enemy)
                 {
                     let mut mv = Move::new(4, 6);
-                    mv.is_castle = true;
+                    mv.set_castle(true);
                     out.push(mv);
                 }
             }
@@ -302,7 +302,7 @@ fn gen_castling_moves(pos: &Position, us: Color, occupied: Bitboard, out: &mut V
                     && !pos.is_square_attacked(3, enemy)
                 {
                     let mut mv = Move::new(4, 2);
-                    mv.is_castle = true;
+                    mv.set_castle(true);
                     out.push(mv);
                 }
             }
@@ -316,7 +316,7 @@ fn gen_castling_moves(pos: &Position, us: Color, occupied: Bitboard, out: &mut V
                     && !pos.is_square_attacked(62, enemy)
                 {
                     let mut mv = Move::new(60, 62);
-                    mv.is_castle = true;
+                    mv.set_castle(true);
                     out.push(mv);
                 }
             }
@@ -328,7 +328,7 @@ fn gen_castling_moves(pos: &Position, us: Color, occupied: Bitboard, out: &mut V
                     && !pos.is_square_attacked(59, enemy)
                 {
                     let mut mv = Move::new(60, 58);
-                    mv.is_castle = true;
+                    mv.set_castle(true);
                     out.push(mv);
                 }
             }

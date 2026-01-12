@@ -86,7 +86,7 @@ fn test_fifty_move_rule_reset_on_pawn_move() {
 
     // Find any pawn move - the white pawn is on e2
     let pawn_move = moves.iter().find(|m| {
-        pos_copy.piece_at(m.from).map(|p| p.kind == chess_core::PieceKind::Pawn).unwrap_or(false)
+        pos_copy.piece_at(m.from()).map(|p| p.kind == chess_core::PieceKind::Pawn).unwrap_or(false)
     }).expect("Should have a pawn move available");
     pos.make_move(*pawn_move);
 

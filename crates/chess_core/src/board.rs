@@ -1,6 +1,7 @@
 use crate::attacks::{bishop_attacks, king_attacks, knight_attacks, pawn_attacks, rook_attacks};
 use crate::bitboard::Bitboard;
 use crate::types::*;
+use crate::zobrist::ZOBRIST;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CastlingRights {
@@ -75,6 +76,8 @@ pub struct Position {
     pub en_passant: Option<u8>, // square behind a pawn that just advanced 2
     pub halfmove_clock: u32,
     pub fullmove_number: u32,
+    /// Zobrist hash for fast repetition detection (incrementally updated)
+    hash: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -87,6 +90,8 @@ pub struct Undo {
     pub moved_piece: Piece,
     pub rook_move: Option<(u8, u8)>, // (rook_from, rook_to) for castling
     pub ep_captured_sq: Option<u8>,  // square actually captured in en-passant
+    /// Previous hash value for unmake
+    prev_hash: u64,
 }
 
 impl Position {
@@ -104,6 +109,7 @@ impl Position {
             en_passant: None,
             halfmove_clock: 0,
             fullmove_number: 1,
+            hash: 0, // Will be computed after pieces are placed
         };
 
         // Pawns
@@ -150,7 +156,47 @@ impl Position {
                 }),
             );
         }
+        // Compute initial hash after pieces are placed
+        p.hash = p.compute_hash();
         p
+    }
+
+    /// Compute the Zobrist hash from scratch (used for initialization).
+    fn compute_hash(&self) -> u64 {
+        let mut h = 0u64;
+
+        // Hash pieces
+        for sq in 0..64u8 {
+            if let Some(piece) = self.board[sq as usize] {
+                h ^= ZOBRIST.piece_key(piece, sq);
+            }
+        }
+
+        // Hash side to move (only XOR if black)
+        if self.side_to_move == Color::Black {
+            h ^= ZOBRIST.side_to_move;
+        }
+
+        // Hash castling rights
+        if self.castling.wk {
+            h ^= ZOBRIST.castling_key(0);
+        }
+        if self.castling.wq {
+            h ^= ZOBRIST.castling_key(1);
+        }
+        if self.castling.bk {
+            h ^= ZOBRIST.castling_key(2);
+        }
+        if self.castling.bq {
+            h ^= ZOBRIST.castling_key(3);
+        }
+
+        // Hash en passant file
+        if let Some(ep_sq) = self.en_passant {
+            h ^= ZOBRIST.ep_key(file_of(ep_sq) as u8);
+        }
+
+        h
     }
 
     pub fn from_fen(fen: &str) -> Self {
@@ -244,7 +290,7 @@ impl Position {
             }
         }
 
-        Position {
+        let mut pos = Position {
             board,
             bitboards,
             side_to_move,
@@ -252,7 +298,10 @@ impl Position {
             en_passant,
             halfmove_clock,
             fullmove_number,
-        }
+            hash: 0,
+        };
+        pos.hash = pos.compute_hash();
+        pos
     }
 
     /// Get the king square for a color using bitboards (O(1)).
@@ -329,117 +378,21 @@ impl Position {
         false
     }
 
-    /// Legacy is_square_attacked using mailbox (for reference, can be removed later)
-    #[allow(dead_code)]
-    fn is_square_attacked_mailbox(&self, target: u8, by: Color) -> bool {
-        // Pawn attacks
-        let tf = file_of(target);
-        let tr = rank_of(target);
-        let pawn_dirs: &[(i8, i8)] = match by {
-            Color::White => &[(-1, -1), (1, -1)], // white pawns attack upward in rank, but target attacked from below
-            Color::Black => &[(-1, 1), (1, 1)],
-        };
-        for (df, dr) in pawn_dirs {
-            if let Some(s) = sq(tf + df, tr + dr)
-                && let Some(pc) = self.piece_at(s)
-                && pc.color == by
-                && pc.kind == PieceKind::Pawn
-            {
-                return true;
-            }
-        }
-
-        // Knight attacks
-        let knight = [
-            (1, 2),
-            (2, 1),
-            (-1, 2),
-            (-2, 1),
-            (1, -2),
-            (2, -1),
-            (-1, -2),
-            (-2, -1),
-        ];
-        for (df, dr) in knight {
-            if let Some(s) = sq(tf + df, tr + dr)
-                && let Some(pc) = self.piece_at(s)
-                && pc.color == by
-                && pc.kind == PieceKind::Knight
-            {
-                return true;
-            }
-        }
-
-        // King adjacency
-        let king = [
-            (1, 1),
-            (1, 0),
-            (1, -1),
-            (0, 1),
-            (0, -1),
-            (-1, 1),
-            (-1, 0),
-            (-1, -1),
-        ];
-        for (df, dr) in king {
-            if let Some(s) = sq(tf + df, tr + dr)
-                && let Some(pc) = self.piece_at(s)
-                && pc.color == by
-                && pc.kind == PieceKind::King
-            {
-                return true;
-            }
-        }
-
-        // Sliding: bishop/rook/queen
-        let diag = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
-        let ortho = [(1, 0), (-1, 0), (0, 1), (0, -1)];
-
-        for (df, dr) in diag {
-            let mut f = tf + df;
-            let mut r = tr + dr;
-            while let Some(sq2) = sq(f, r) {
-                if let Some(pc) = self.piece_at(sq2) {
-                    if pc.color == by
-                        && (pc.kind == PieceKind::Bishop || pc.kind == PieceKind::Queen)
-                    {
-                        return true;
-                    }
-                    break;
-                }
-                f += df;
-                r += dr;
-            }
-        }
-        for (df, dr) in ortho {
-            let mut f = tf + df;
-            let mut r = tr + dr;
-            while let Some(sq2) = sq(f, r) {
-                if let Some(pc) = self.piece_at(sq2) {
-                    if pc.color == by && (pc.kind == PieceKind::Rook || pc.kind == PieceKind::Queen)
-                    {
-                        return true;
-                    }
-                    break;
-                }
-                f += df;
-                r += dr;
-            }
-        }
-
-        false
-    }
-
     pub fn make_move(&mut self, mv: Move) -> Undo {
-        let from = mv.from;
-        let to = mv.to;
+        let from = mv.from();
+        let to = mv.to();
         let moved = self.piece_at(from).expect("no piece on from-square");
         let mut captured = self.piece_at(to);
         let prev_castling = self.castling;
         let prev_ep = self.en_passant;
         let prev_hmc = self.halfmove_clock;
         let prev_fmn = self.fullmove_number;
+        let prev_hash = self.hash;
 
+        // Start hash update: XOR out old en passant if any
+        if let Some(ep_sq) = self.en_passant {
+            self.hash ^= ZOBRIST.ep_key(file_of(ep_sq) as u8);
+        }
         self.en_passant = None;
 
         // Halfmove clock reset on capture or pawn move
@@ -447,7 +400,7 @@ impl Position {
 
         // Handle en-passant capture
         let mut ep_captured_sq = None;
-        if mv.is_en_passant {
+        if mv.is_en_passant() {
             let dir = match moved.color {
                 Color::White => -1,
                 Color::Black => 1,
@@ -456,10 +409,23 @@ impl Position {
             let cap_file = file_of(to);
             if let Some(cs) = sq(cap_file, cap_rank) {
                 captured = self.piece_at(cs);
+                // Hash out captured pawn
+                if let Some(cp) = captured {
+                    self.hash ^= ZOBRIST.piece_key(cp, cs);
+                }
                 self.set_piece(cs, None);
                 ep_captured_sq = Some(cs);
                 reset_hmc = true;
             }
+        }
+
+        // Hash out moved piece from source
+        self.hash ^= ZOBRIST.piece_key(moved, from);
+        // Hash out captured piece at destination (if any, and not en passant)
+        if !mv.is_en_passant()
+            && let Some(cp) = captured
+        {
+            self.hash ^= ZOBRIST.piece_key(cp, to);
         }
 
         // Move piece (promotion handled after)
@@ -467,24 +433,30 @@ impl Position {
         self.set_piece(to, Some(moved));
 
         // Promotion
-        if moved.kind == PieceKind::Pawn {
+        let final_piece = if moved.kind == PieceKind::Pawn {
             let r = rank_of(to);
             if (moved.color == Color::White && r == 7) || (moved.color == Color::Black && r == 0) {
-                let promo = mv.promo.unwrap_or(PieceKind::Queen);
-                self.set_piece(
-                    to,
-                    Some(Piece {
-                        color: moved.color,
-                        kind: promo,
-                    }),
-                );
+                let promo = mv.promo().unwrap_or(PieceKind::Queen);
+                let promoted = Piece {
+                    color: moved.color,
+                    kind: promo,
+                };
+                self.set_piece(to, Some(promoted));
                 reset_hmc = true;
+                promoted
+            } else {
+                moved
             }
-        }
+        } else {
+            moved
+        };
+
+        // Hash in the piece at destination
+        self.hash ^= ZOBRIST.piece_key(final_piece, to);
 
         // Castling rook move
         let mut rook_move = None;
-        if mv.is_castle && moved.kind == PieceKind::King {
+        if mv.is_castle() && moved.kind == PieceKind::King {
             // Determine rook squares by destination
             // White: e1->g1 rook h1->f1, e1->c1 rook a1->d1
             // Black: e8->g8 rook h8->f8, e8->c8 rook a8->d8
@@ -497,6 +469,9 @@ impl Position {
             };
             if rf != 255 {
                 let rook = self.piece_at(rf).unwrap();
+                // Hash out rook from source, hash in at destination
+                self.hash ^= ZOBRIST.piece_key(rook, rf);
+                self.hash ^= ZOBRIST.piece_key(rook, rt);
                 self.set_piece(rf, None);
                 self.set_piece(rt, Some(rook));
                 rook_move = Some((rf, rt));
@@ -505,6 +480,20 @@ impl Position {
         }
 
         // Update castling rights if king/rook moved or rook captured
+        // First, XOR out old castling state
+        if prev_castling.wk {
+            self.hash ^= ZOBRIST.castling_key(0);
+        }
+        if prev_castling.wq {
+            self.hash ^= ZOBRIST.castling_key(1);
+        }
+        if prev_castling.bk {
+            self.hash ^= ZOBRIST.castling_key(2);
+        }
+        if prev_castling.bq {
+            self.hash ^= ZOBRIST.castling_key(3);
+        }
+
         match moved.color {
             Color::White => {
                 if moved.kind == PieceKind::King {
@@ -559,6 +548,20 @@ impl Position {
             }
         }
 
+        // XOR in new castling state
+        if self.castling.wk {
+            self.hash ^= ZOBRIST.castling_key(0);
+        }
+        if self.castling.wq {
+            self.hash ^= ZOBRIST.castling_key(1);
+        }
+        if self.castling.bk {
+            self.hash ^= ZOBRIST.castling_key(2);
+        }
+        if self.castling.bq {
+            self.hash ^= ZOBRIST.castling_key(3);
+        }
+
         // Double pawn push sets en-passant square
         if moved.kind == PieceKind::Pawn {
             let fr = rank_of(from);
@@ -570,6 +573,10 @@ impl Position {
                 let ep_rank = (fr + tr) / 2;
                 let ep_file = file_of(from);
                 self.en_passant = sq(ep_file, ep_rank);
+                // Hash in new en passant
+                if let Some(ep_sq) = self.en_passant {
+                    self.hash ^= ZOBRIST.ep_key(file_of(ep_sq) as u8);
+                }
             }
         }
 
@@ -579,11 +586,12 @@ impl Position {
             self.halfmove_clock + 1
         };
 
-        // Switch side
+        // Switch side and update hash
         if self.side_to_move == Color::Black {
             self.fullmove_number += 1;
         }
         self.side_to_move = self.side_to_move.other();
+        self.hash ^= ZOBRIST.side_to_move; // Toggle side to move in hash
 
         Undo {
             captured,
@@ -594,10 +602,14 @@ impl Position {
             moved_piece: moved,
             rook_move,
             ep_captured_sq,
+            prev_hash,
         }
     }
 
     pub fn unmake_move(&mut self, mv: Move, undo: Undo) {
+        // Restore hash directly (avoids recomputation)
+        self.hash = undo.prev_hash;
+
         // Restore side
         self.side_to_move = self.side_to_move.other();
         self.castling = undo.castling;
@@ -605,8 +617,8 @@ impl Position {
         self.halfmove_clock = undo.halfmove_clock;
         self.fullmove_number = undo.fullmove_number;
 
-        let from = mv.from;
-        let to = mv.to;
+        let from = mv.from();
+        let to = mv.to();
 
         // Undo castling rook move
         if let Some((rf, rt)) = undo.rook_move {
@@ -634,7 +646,7 @@ impl Position {
         self.set_piece(from, Some(piece_on_to));
 
         // Restore captured piece
-        if mv.is_en_passant {
+        if mv.is_en_passant() {
             if let Some(cs) = undo.ep_captured_sq {
                 self.set_piece(cs, undo.captured);
             }
@@ -649,50 +661,15 @@ impl Position {
     /// - Piece positions
     /// - Side to move
     /// - Castling rights
-    /// - En passant square
+    /// - En passant file
     ///
     /// It does NOT include halfmove clock or fullmove number, as those
     /// don't affect position identity for repetition purposes.
+    ///
+    /// This returns the incrementally-updated Zobrist hash, which is O(1).
+    #[inline(always)]
     pub fn position_hash(&self) -> u64 {
-        fn mix(mut h: u64, x: u64) -> u64 {
-            h ^= x;
-            h = h.wrapping_mul(0x100000001b3);
-            h
-        }
-
-        let mut h = 0xcbf29ce484222325u64;
-
-        // Side to move
-        h = mix(
-            h,
-            match self.side_to_move {
-                Color::White => 1,
-                Color::Black => 2,
-            },
-        );
-
-        // Castling rights
-        h = mix(h, if self.castling.wk { 3 } else { 5 });
-        h = mix(h, if self.castling.wq { 7 } else { 11 });
-        h = mix(h, if self.castling.bk { 13 } else { 17 });
-        h = mix(h, if self.castling.bq { 19 } else { 23 });
-
-        // En passant square
-        if let Some(ep) = self.en_passant {
-            h = mix(h, 29 + ep as u64);
-        }
-
-        // Board state
-        for (i, sq) in self.board.iter().enumerate() {
-            let v = if let Some(pc) = sq {
-                (i as u64) ^ ((pc.color.idx() as u64) << 6) ^ ((pc.kind as u64) << 3)
-            } else {
-                i as u64
-            };
-            h = mix(h, v);
-        }
-
-        h
+        self.hash
     }
 
     /// Check if the position is a draw due to insufficient material.

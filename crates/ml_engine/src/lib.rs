@@ -27,7 +27,9 @@ mod features;
 #[cfg(feature = "onnx")]
 mod onnx_engine;
 
-use chess_core::{legal_moves_into, Engine, Move, Position, SearchLimits, SearchResult, TimeControl};
+use chess_core::{
+    legal_moves_into, Engine, Move, Position, SearchLimits, SearchResult, TimeControl,
+};
 use std::path::PathBuf;
 
 /// Neural network chess engine.
@@ -36,10 +38,11 @@ use std::path::PathBuf;
 /// This allows testing the infrastructure before training models.
 pub struct NeuralEngine {
     /// Path to the loaded model (if any)
-    #[allow(dead_code)]
     model_path: Option<PathBuf>,
     /// Model version string
     version: String,
+    /// Cached name string for UCI identification (avoids allocation on every call)
+    name: String,
     /// Node counter for statistics
     nodes: u64,
     /// Internal ONNX model (when feature enabled)
@@ -57,9 +60,12 @@ impl NeuralEngine {
     /// Creates a new neural engine without a loaded model.
     /// Will use random move selection until a model is loaded.
     pub fn new() -> Self {
+        let version = "random-v0".to_string();
+        let name = format!("Neural-{}", version);
         Self {
             model_path: None,
-            version: "random-v0".to_string(),
+            version,
+            name,
             nodes: 0,
             #[cfg(feature = "onnx")]
             model: None,
@@ -83,12 +89,15 @@ impl NeuralEngine {
             return Err(format!("Model not found: {}", model_path.display()));
         }
 
+        let name = format!("Neural-{}", version);
+
         #[cfg(feature = "onnx")]
         {
             let model = onnx_engine::OnnxModel::load(&model_path)?;
             Ok(Self {
                 model_path: Some(model_path),
                 version: version.to_string(),
+                name,
                 nodes: 0,
                 model: Some(model),
             })
@@ -100,6 +109,7 @@ impl NeuralEngine {
             Ok(Self {
                 model_path: Some(model_path),
                 version: version.to_string(),
+                name,
                 nodes: 0,
             })
         }
@@ -108,6 +118,11 @@ impl NeuralEngine {
     /// Returns the currently loaded model version.
     pub fn model_version(&self) -> &str {
         &self.version
+    }
+
+    /// Returns the path to the currently loaded model, if any.
+    pub fn model_path(&self) -> Option<&std::path::Path> {
+        self.model_path.as_deref()
     }
 
     /// Evaluate position using neural network (or fallback).
@@ -122,23 +137,21 @@ impl NeuralEngine {
         self.material_eval(pos)
     }
 
-    /// Simple material evaluation as fallback.
+    /// Simple material evaluation as fallback, using bitboard popcount.
     fn material_eval(&self, pos: &Position) -> i32 {
         use chess_core::{Color, PieceKind};
+
+        // Material values indexed by PieceKind::idx()
+        const PIECE_VALUES: [i32; 6] = [100, 320, 330, 500, 900, 0];
+
         let mut score = 0i32;
-        for sq in 0..64u8 {
-            if let Some(pc) = pos.piece_at(sq) {
-                let v = match pc.kind {
-                    PieceKind::Pawn => 100,
-                    PieceKind::Knight => 320,
-                    PieceKind::Bishop => 330,
-                    PieceKind::Rook => 500,
-                    PieceKind::Queen => 900,
-                    PieceKind::King => 0,
-                };
-                score += if pc.color == Color::White { v } else { -v };
-            }
+        for kind in PieceKind::ALL {
+            let value = PIECE_VALUES[kind.idx()];
+            let white_count = pos.bitboards.pieces(Color::White, kind).popcount() as i32;
+            let black_count = pos.bitboards.pieces(Color::Black, kind).popcount() as i32;
+            score += value * (white_count - black_count);
         }
+
         if pos.side_to_move == Color::White {
             score
         } else {
@@ -239,8 +252,7 @@ impl Engine for NeuralEngine {
     }
 
     fn name(&self) -> &str {
-        // Include version in name for UCI identification
-        Box::leak(format!("Neural-{}", self.version).into_boxed_str())
+        &self.name
     }
 
     fn author(&self) -> &str {

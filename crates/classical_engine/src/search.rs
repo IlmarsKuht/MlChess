@@ -1,6 +1,6 @@
 //! Negamax search with alpha-beta pruning
 
-use chess_core::{legal_moves_into, Color, Move, Position, TimeControl};
+use chess_core::{legal_moves_into, Move, Position, TimeControl};
 
 use crate::eval::evaluate;
 
@@ -10,40 +10,6 @@ pub struct SearchOutcome {
     pub best_move: Option<(Move, i32)>,
     /// True if search was stopped early due to time
     pub stopped: bool,
-}
-
-/// Computes a lightweight hash for repetition detection.
-fn position_key(pos: &Position) -> u64 {
-    fn mix(mut h: u64, x: u64) -> u64 {
-        h ^= x;
-        h = h.wrapping_mul(0x100000001b3);
-        h
-    }
-
-    let mut h = 0xcbf29ce484222325u64;
-    h = mix(
-        h,
-        match pos.side_to_move {
-            Color::White => 1,
-            Color::Black => 2,
-        },
-    );
-    h = mix(h, if pos.castling.wk { 3 } else { 5 });
-    h = mix(h, if pos.castling.wq { 7 } else { 11 });
-    h = mix(h, if pos.castling.bk { 13 } else { 17 });
-    h = mix(h, if pos.castling.bq { 19 } else { 23 });
-    if let Some(ep) = pos.en_passant {
-        h = mix(h, 29 + ep as u64);
-    }
-    for (i, sq) in pos.board.iter().enumerate() {
-        let v = if let Some(pc) = sq {
-            (i as u64) ^ ((pc.color.idx() as u64) << 6) ^ ((pc.kind as u64) << 3)
-        } else {
-            i as u64
-        };
-        h = mix(h, v);
-    }
-    h
 }
 
 /// Searches the position and returns the best move with its score.
@@ -78,7 +44,7 @@ pub fn pick_best_move(
     let mut stopped = false;
 
     let mut history = Vec::with_capacity((depth as usize) + 1);
-    history.push(position_key(&tmp));
+    history.push(tmp.position_hash());
 
     for mv in moves {
         // Check time before starting each root move
@@ -88,7 +54,7 @@ pub fn pick_best_move(
         }
 
         let undo = tmp.make_move(mv);
-        history.push(position_key(&tmp));
+        history.push(tmp.position_hash());
         *nodes += 1;
 
         let (score, was_stopped) = negamax(
@@ -144,7 +110,7 @@ fn negamax(
         return (0, false);
     }
 
-    let curr_key = *history.last().unwrap_or(&position_key(pos));
+    let curr_key = *history.last().unwrap_or(&pos.position_hash());
     let repeats = history.iter().filter(|&&k| k == curr_key).count();
     if repeats >= 3 {
         return (0, false); // threefold repetition draw
@@ -172,7 +138,7 @@ fn negamax(
 
     for mv in moves {
         let undo = pos.make_move(mv);
-        history.push(position_key(pos));
+        history.push(pos.position_hash());
         *nodes += 1;
 
         let (score, stopped) = negamax(pos, depth - 1, -beta, -alpha, history, nodes, tc);

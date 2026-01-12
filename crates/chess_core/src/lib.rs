@@ -6,6 +6,7 @@ pub mod perft;
 pub mod time_control;
 pub mod types;
 pub mod uci;
+pub mod zobrist;
 
 // Re-export core game logic (not engine-specific)
 pub use attacks::*;
@@ -16,6 +17,7 @@ pub use perft::perft;
 pub use time_control::*;
 pub use types::*;
 pub use uci::*;
+pub use zobrist::ZOBRIST;
 
 // =============================================================================
 // Engine trait — implemented by all chess engines (classical, neural, etc.)

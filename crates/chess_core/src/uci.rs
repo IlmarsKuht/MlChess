@@ -2,9 +2,9 @@ use crate::{board::Position, movegen::legal_moves, types::*};
 
 pub fn move_to_uci(mv: Move) -> String {
     let mut s = String::new();
-    s.push_str(&sq_to_coord(mv.from));
-    s.push_str(&sq_to_coord(mv.to));
-    if let Some(p) = mv.promo {
+    s.push_str(&sq_to_coord(mv.from()));
+    s.push_str(&sq_to_coord(mv.to()));
+    if let Some(p) = mv.promo() {
         let ch = match p {
             PieceKind::Queen => 'q',
             PieceKind::Rook => 'r',
@@ -38,12 +38,12 @@ pub fn parse_uci_move(pos: &Position, txt: &str) -> Option<Move> {
 
     let legals = legal_moves(pos);
     for mut m in legals {
-        if m.from == from && m.to == to {
+        if m.from() == from && m.to() == to {
             if promo.is_some() {
-                m.promo = promo;
+                m.set_promo(promo);
             }
             // Must match promotion if present
-            if promo.is_some() && m.promo != promo {
+            if promo.is_some() && m.promo() != promo {
                 continue;
             }
             return Some(m);

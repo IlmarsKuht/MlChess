@@ -918,8 +918,8 @@ fn tournament_subscription(
 
                             match result.best_move {
                                 Some(mv) => {
-                                    let from = mv.from;
-                                    let to = mv.to;
+                                    let from = mv.from();
+                                    let to = mv.to();
                                     pos.make_move(mv);
 
                                     // Track position hash for repetition detection

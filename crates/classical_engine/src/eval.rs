@@ -1,8 +1,14 @@
-//! Material-based position evaluation
+//! Material-based position evaluation using bitboards.
 
 use chess_core::{Color, PieceKind, Position};
 
+/// Material values in centipawns, indexed by PieceKind::idx().
+/// Order: Pawn, Knight, Bishop, Rook, Queen, King
+const PIECE_VALUES: [i32; 6] = [100, 320, 330, 500, 900, 0];
+
 /// Evaluates the position from the side-to-move's perspective.
+///
+/// Uses bitboard popcount for efficient material counting.
 ///
 /// Returns a score in centipawns:
 /// - Positive = good for side to move
@@ -11,11 +17,12 @@ use chess_core::{Color, PieceKind, Position};
 pub fn evaluate(pos: &Position) -> i32 {
     let mut score = 0i32;
 
-    for sq in 0..64u8 {
-        if let Some(pc) = pos.piece_at(sq) {
-            let v = piece_value(pc.kind);
-            score += if pc.color == Color::White { v } else { -v };
-        }
+    // Count material using bitboard popcount (much faster than mailbox iteration)
+    for kind in PieceKind::ALL {
+        let value = PIECE_VALUES[kind.idx()];
+        let white_count = pos.bitboards.pieces(Color::White, kind).popcount() as i32;
+        let black_count = pos.bitboards.pieces(Color::Black, kind).popcount() as i32;
+        score += value * (white_count - black_count);
     }
 
     // Convert to side-to-move perspective
@@ -23,18 +30,5 @@ pub fn evaluate(pos: &Position) -> i32 {
         score
     } else {
         -score
-    }
-}
-
-/// Returns the material value of a piece in centipawns.
-#[inline]
-pub fn piece_value(kind: PieceKind) -> i32 {
-    match kind {
-        PieceKind::Pawn => 100,
-        PieceKind::Knight => 320,
-        PieceKind::Bishop => 330,
-        PieceKind::Rook => 500,
-        PieceKind::Queen => 900,
-        PieceKind::King => 0,
     }
 }
