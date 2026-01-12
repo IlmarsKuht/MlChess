@@ -27,6 +27,8 @@ Purpose
    
    **The codebase must be warning-free at all times.**
 
+6. **NO comments in code unless absolutely essential.** Rely on clear, self-documenting code; only keep comments that convey critical rationale that cannot be expressed in code.
+
 ### Before Completing Any Work
 
 1. Run `cargo build --workspace` — fix ALL warnings
@@ -46,24 +48,28 @@ Purpose
 ## Quick architecture overview
 
 Workspace crates:
-- `crates/chess_core` — Core game logic: board representation, move generation, perft, UCI helpers. NO engine logic here.
-- `crates/classical_engine` — Classical alpha-beta search with material evaluation. Implements `Engine` trait.
-- `crates/ml_engine` — Neural network engine with ONNX inference. Implements `Engine` trait.
-- `crates/tournament` — Match runner for engine vs engine games with Elo tracking.
-- `crates/uci_engine` — UCI protocol binary, supports switching between engines at runtime.
-- `crates/gui` — Iced-based GUI for playing games, running tournaments, and tracking Elo ratings.
+- `crates/chess_core` — Core rules, bitboard representation, move generation, perft harness, zobrist hashing, UCI helpers, `SearchLimits`/`TimeControl`, and the shared `Engine` trait. No engine-specific logic lives here.
+- `crates/classical_engine` — Deterministic negamax with alpha-beta pruning and lightweight material evaluation. Obeys `TimeControl` for early stop and serves as the baseline engine implementation.
+- `crates/ml_engine` — NeuralEngine with optional `onnx` feature for loading ONNX models; falls back to material/random play when no model is loaded. Encodes positions via `features` and respects `SearchLimits`.
+- `crates/uci_engine` — Binary that speaks the UCI protocol and can switch between Classical and Neural engines at runtime; handles depth/movetime options and iterative deepening.
+- `crates/tournament` — CLI for running matches/gauntlets between engines, aggregating results, and tracking Elo.
+- `crates/gui` — Iced desktop UI for playing games, running local tournaments, and viewing Elo history.
 
 Key files:
-- `chess_core/src/lib.rs` — Defines the `Engine` trait that all engines implement.
-- `chess_core/src/board.rs`, `types.rs` — Position representation and core types.
-- `chess_core/src/movegen.rs` — Legal move generation.
-- `classical_engine/src/search.rs` — Negamax with alpha-beta pruning.
-- `ml_engine/src/lib.rs` — NeuralEngine with ONNX model loading.
-- `tournament/src/elo.rs` — Elo rating calculations.
+- `chess_core/src/lib.rs` — Re-exports core types and defines `Engine` and `SearchLimits`.
+- `chess_core/src/board.rs`, `types.rs` — Position representation and core enums.
+- `chess_core/src/movegen.rs` — Legal move generation and perft helpers.
+- `chess_core/src/time_control.rs` — Time control and search limit helpers.
+- `classical_engine/src/search.rs` — Negamax with alpha-beta pruning and draw detection.
+- `ml_engine/src/lib.rs` — NeuralEngine setup, model loading (when `onnx` is enabled), and search glue.
+- `tournament/src/match_runner.rs`, `tournament/src/elo.rs` — Match orchestration and Elo calculations.
+- `uci_engine/src/main.rs` — UCI command loop and engine selection.
+- `gui/src/app.rs` — Iced app state, routing, and board/tournament views.
 
 External directories:
-- `models/` — Versioned neural network models (v001/, v002/, etc.) with metadata.toml
-- `training/` — Python scripts for training neural networks (PyTorch → ONNX)
+- `models/` — Versioned neural network models (v001/, v002/, etc.) with `metadata.toml` per version.
+- `training/` — Python training/export pipeline (PyTorch → ONNX) and dataset utilities.
+- `scripts/` — Utility scripts (e.g., profiling helpers).
 
 ## Developer workflows / useful commands
 
@@ -92,7 +98,7 @@ cargo run -p tournament -- leaderboard
 All engines implement this trait from `chess_core`:
 ```rust
 pub trait Engine: Send {
-    fn search(&mut self, pos: &Position, depth: u8) -> SearchResult;
+    fn search(&mut self, pos: &Position, limits: SearchLimits) -> SearchResult;
     fn name(&self) -> &str;
     fn author(&self) -> &str { "ML-chess" }
     fn new_game(&mut self) {}
