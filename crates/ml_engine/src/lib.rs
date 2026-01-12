@@ -166,7 +166,7 @@ impl NeuralEngine {
         if depth == 0 {
             // At depth 0, just pick best by static eval
             let mut best = moves[0];
-            let mut best_score = i32::MIN;
+            let mut best_score = i32::MIN + 1; // +1 to avoid overflow on negation
             for mv in moves {
                 // Check time periodically
                 if tc.should_check_time(self.nodes) && tc.check_time() {
@@ -187,7 +187,7 @@ impl NeuralEngine {
 
         // Simple 1-ply search with NN eval
         let mut best = moves[0];
-        let mut best_score = i32::MIN;
+        let mut best_score = i32::MIN + 1; // +1 to avoid overflow on negation
 
         for mv in moves {
             // Check time before each root move
