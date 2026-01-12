@@ -2,7 +2,7 @@
 
 use crate::game::GameState;
 use crate::styles::{self, SQUARE_SIZE};
-use chess_core::{Color as ChessColor, PieceKind};
+use chess_core::{Color as ChessColor, PieceKind, Position};
 use iced::widget::{button, column, container, row, svg, text, Svg};
 use iced::{Color, Element, Length};
 
@@ -133,7 +133,7 @@ impl<'a> BoardView<'a> {
 }
 
 /// Get the SVG handle for a piece
-fn get_piece_svg(color: ChessColor, kind: PieceKind) -> Svg<'static> {
+pub fn get_piece_svg(color: ChessColor, kind: PieceKind) -> Svg<'static> {
     let filename = match (color, kind) {
         (ChessColor::White, PieceKind::King) => "wk",
         (ChessColor::White, PieceKind::Queen) => "wq",
@@ -155,11 +155,84 @@ fn get_piece_svg(color: ChessColor, kind: PieceKind) -> Svg<'static> {
 }
 
 /// Blend two colors together
-fn blend_colors(base: Color, overlay: Color) -> Color {
+pub fn blend_colors(base: Color, overlay: Color) -> Color {
     let alpha = overlay.a;
     Color::from_rgb(
         base.r * (1.0 - alpha) + overlay.r * alpha,
         base.g * (1.0 - alpha) + overlay.g * alpha,
         base.b * (1.0 - alpha) + overlay.b * alpha,
     )
+}
+
+/// Render a static (read-only) chess board for spectating
+/// Returns an Element with the given Message type (no interaction)
+pub fn render_static_board<M: 'static>(
+    position: &Position,
+    last_move: Option<(u8, u8)>,
+    flipped: bool,
+) -> Element<'static, M> {
+    let mut board_column = column![].spacing(0);
+
+    for rank in 0..8 {
+        let display_rank = if flipped { rank } else { 7 - rank };
+        let mut rank_row = row![].spacing(0);
+
+        for file in 0..8 {
+            let display_file = if flipped { 7 - file } else { file };
+            let sq = (display_rank * 8 + display_file) as u8;
+
+            let is_light = (display_rank + display_file) % 2 == 0;
+
+            // Determine square color
+            let bg_color = if last_move.is_some_and(|(from, to)| sq == from || sq == to) {
+                blend_colors(
+                    if is_light { styles::LIGHT_SQUARE } else { styles::DARK_SQUARE },
+                    styles::LAST_MOVE_SQUARE,
+                )
+            } else if is_light {
+                styles::LIGHT_SQUARE
+            } else {
+                styles::DARK_SQUARE
+            };
+
+            // Get piece on this square
+            let content: Element<'static, M> = if let Some(piece) = position.piece_at(sq) {
+                let svg_handle = get_piece_svg(piece.color, piece.kind);
+                container(svg_handle.width(SQUARE_SIZE).height(SQUARE_SIZE))
+                    .width(SQUARE_SIZE)
+                    .height(SQUARE_SIZE)
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill)
+                    .into()
+            } else {
+                container(text(""))
+                    .width(SQUARE_SIZE)
+                    .height(SQUARE_SIZE)
+                    .into()
+            };
+
+            let square = container(content)
+                .width(SQUARE_SIZE)
+                .height(SQUARE_SIZE)
+                .style(move |_| container::Style {
+                    background: Some(iced::Background::Color(bg_color)),
+                    ..Default::default()
+                });
+
+            rank_row = rank_row.push(square);
+        }
+
+        board_column = board_column.push(rank_row);
+    }
+
+    container(board_column)
+        .style(|_| container::Style {
+            border: iced::Border {
+                color: Color::from_rgb(0.3, 0.3, 0.3),
+                width: 2.0,
+                radius: 0.0.into(),
+            },
+            ..Default::default()
+        })
+        .into()
 }

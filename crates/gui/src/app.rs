@@ -5,7 +5,7 @@ use crate::game::{ChessClock, GameResult, GameState, TimeControl};
 use crate::styles::{EVAL_BAR_WIDTH, EVAL_BLACK, EVAL_WHITE, PANEL_WIDTH, SQUARE_SIZE};
 use crate::tournament_view::{self, TournamentMessage, TournamentState};
 
-use chess_core::{Color, Engine, Move};
+use chess_core::{legal_moves_into, Color, Engine, Move, Position};
 use classical_engine::ClassicalEngine;
 use iced::time;
 use iced::widget::{
@@ -120,6 +120,8 @@ pub struct ChessApp {
     tournament: TournamentState,
     /// Engine thinking in background
     engine_task_running: bool,
+    /// Tournament task running
+    tournament_task_running: bool,
     /// Time control preset
     time_preset: TimePreset,
     /// Custom time (minutes)
@@ -171,6 +173,7 @@ impl ChessApp {
                 engine_depth: 4,
                 tournament: TournamentState::new(),
                 engine_task_running: false,
+                tournament_task_running: false,
                 time_preset: TimePreset::default(),
                 custom_time_mins: 10,
                 custom_increment_secs: 0,
@@ -184,12 +187,58 @@ impl ChessApp {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
+        let mut subscriptions = vec![];
+
         // Tick the clock every 100ms when game is in progress and clock is running
         if self.game.result == GameResult::InProgress && self.game.clock.enabled {
-            time::every(Duration::from_millis(100)).map(|_| Message::ClockTick)
-        } else {
-            Subscription::none()
+            subscriptions.push(time::every(Duration::from_millis(100)).map(|_| Message::ClockTick));
         }
+
+        // Tournament subscription
+        if self.tournament.running && self.tournament_task_running {
+            let engine1_id = self
+                .tournament
+                .engine1
+                .as_ref()
+                .map(|e| e.id.clone())
+                .unwrap_or_default();
+            let engine2_id = self
+                .tournament
+                .engine2
+                .as_ref()
+                .map(|e| e.id.clone())
+                .unwrap_or_default();
+            let engine1_name = self
+                .tournament
+                .engine1
+                .as_ref()
+                .map(|e| e.display_name.clone())
+                .unwrap_or_default();
+            let engine2_name = self
+                .tournament
+                .engine2
+                .as_ref()
+                .map(|e| e.display_name.clone())
+                .unwrap_or_default();
+            let num_games = self.tournament.num_games;
+            let depth = self.tournament.depth;
+            let progress = self.tournament.progress;
+
+            subscriptions.push(
+                tournament_subscription(
+                    engine1_id,
+                    engine2_id,
+                    engine1_name,
+                    engine2_name,
+                    num_games,
+                    depth,
+                    progress,
+                )
+                .map(Message::Tournament),
+            );
+        }
+
+        Subscription::batch(subscriptions)
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -382,16 +431,50 @@ impl ChessApp {
                 }
             }
             TournamentMessage::StartTournament => {
+                if self.tournament_task_running {
+                    return Task::none();
+                }
+
                 self.tournament.running = true;
                 self.tournament.progress = 0;
                 self.tournament.status = "Tournament running...".to_string();
-                // TODO: Start actual tournament in background
+                self.tournament.live_position = Position::startpos();
+                self.tournament.live_last_move = None;
+                self.tournament.live_game_info = String::new();
+                self.tournament_task_running = true;
             }
             TournamentMessage::StopTournament => {
                 self.tournament.running = false;
                 self.tournament.status = "Tournament stopped".to_string();
+                self.tournament_task_running = false;
             }
             TournamentMessage::RefreshElo => {
+                self.tournament.refresh_elo();
+            }
+            TournamentMessage::ToggleWatchLive => {
+                self.tournament.watch_live = !self.tournament.watch_live;
+            }
+            TournamentMessage::PositionUpdate {
+                position,
+                last_move,
+                game_info,
+            } => {
+                self.tournament.live_position = position;
+                self.tournament.live_last_move = last_move;
+                self.tournament.live_game_info = game_info;
+                // Continue running the tournament - this message is followed by another task
+            }
+            TournamentMessage::GameFinished { game_num, result } => {
+                self.tournament.progress = game_num;
+                self.tournament.status = format!("Game {}: {}", game_num, result);
+            }
+            TournamentMessage::TournamentFinished => {
+                self.tournament.running = false;
+                self.tournament_task_running = false;
+                self.tournament.status = format!(
+                    "Tournament complete! {} games played",
+                    self.tournament.num_games
+                );
                 self.tournament.refresh_elo();
             }
         }
@@ -712,4 +795,161 @@ fn tab_button(label: &str, tab: Tab, current: Tab) -> Element<'static, Message> 
             button::secondary
         })
         .into()
+}
+
+/// Create an engine from its ID
+fn create_engine(id: &str) -> Box<dyn Engine> {
+    match id {
+        "classical" => Box::new(ClassicalEngine::new()),
+        "neural" | "neural:v001" => Box::new(NeuralEngine::new()),
+        _ => Box::new(ClassicalEngine::new()),
+    }
+}
+
+/// Create a subscription that runs a tournament and emits position updates
+fn tournament_subscription(
+    engine1_id: String,
+    engine2_id: String,
+    engine1_name: String,
+    engine2_name: String,
+    num_games: u32,
+    depth: u8,
+    _current_progress: u32,
+) -> Subscription<TournamentMessage> {
+    use iced::futures::SinkExt;
+
+    struct TournamentWorker;
+
+    Subscription::run_with_id(
+        std::any::TypeId::of::<TournamentWorker>(),
+        iced::stream::channel(100, move |mut output| {
+            let e1_id = engine1_id.clone();
+            let e2_id = engine2_id.clone();
+            let e1_name = engine1_name.clone();
+            let e2_name = engine2_name.clone();
+
+            async move {
+                // Run tournament in a blocking thread and send updates via channel
+                let (tx, mut rx) = tokio::sync::mpsc::channel::<TournamentMessage>(100);
+
+                let handle = tokio::task::spawn_blocking(move || {
+                    let mut engine1 = create_engine(&e1_id);
+                    let mut engine2 = create_engine(&e2_id);
+
+                    for game_num in 1..=num_games {
+                        // Alternate colors
+                        let engine1_white = game_num % 2 == 1;
+
+                        let (white_name, black_name) = if engine1_white {
+                            (e1_name.as_str(), e2_name.as_str())
+                        } else {
+                            (e2_name.as_str(), e1_name.as_str())
+                        };
+
+                        let game_info = format!(
+                            "Game {}/{}: {} (W) vs {} (B)",
+                            game_num, num_games, white_name, black_name
+                        );
+
+                        let mut pos = Position::startpos();
+                        engine1.new_game();
+                        engine2.new_game();
+
+                        // Send initial position
+                        let _ = tx.blocking_send(TournamentMessage::PositionUpdate {
+                            position: pos.clone(),
+                            last_move: None,
+                            game_info: game_info.clone(),
+                        });
+
+                        // Play the game
+                        for _move_num in 0..200 {
+                            let current_engine: &mut dyn Engine = if engine1_white {
+                                if pos.side_to_move == Color::White {
+                                    &mut *engine1
+                                } else {
+                                    &mut *engine2
+                                }
+                            } else if pos.side_to_move == Color::White {
+                                &mut *engine2
+                            } else {
+                                &mut *engine1
+                            };
+
+                            let result = current_engine.search(&pos, depth);
+
+                            match result.best_move {
+                                Some(mv) => {
+                                    let from = mv.from;
+                                    let to = mv.to;
+                                    pos.make_move(mv);
+
+                                    // Send position update
+                                    let _ = tx.blocking_send(TournamentMessage::PositionUpdate {
+                                        position: pos.clone(),
+                                        last_move: Some((from, to)),
+                                        game_info: game_info.clone(),
+                                    });
+
+                                    // Small delay to make watching possible
+                                    std::thread::sleep(std::time::Duration::from_millis(100));
+                                }
+                                None => break,
+                            }
+
+                            // Check for game end
+                            let mut moves = Vec::new();
+                            let mut test_pos = pos.clone();
+                            legal_moves_into(&mut test_pos, &mut moves);
+                            if moves.is_empty() || pos.halfmove_clock >= 100 {
+                                break;
+                            }
+                        }
+
+                        // Determine result
+                        let mut moves = Vec::new();
+                        let mut test_pos = pos.clone();
+                        legal_moves_into(&mut test_pos, &mut moves);
+
+                        let result_str = if moves.is_empty() {
+                            if pos.in_check(pos.side_to_move) {
+                                if pos.side_to_move == Color::White {
+                                    "0-1 (Black wins)"
+                                } else {
+                                    "1-0 (White wins)"
+                                }
+                            } else {
+                                "1/2-1/2 (Stalemate)"
+                            }
+                        } else {
+                            "1/2-1/2 (Draw)"
+                        };
+
+                        let _ = tx.blocking_send(TournamentMessage::GameFinished {
+                            game_num,
+                            result: result_str.to_string(),
+                        });
+
+                        // Brief pause between games
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                    }
+
+                    let _ = tx.blocking_send(TournamentMessage::TournamentFinished);
+                });
+
+                // Forward messages from the blocking task to the subscription output
+                while let Some(msg) = rx.recv().await {
+                    let _ = output.send(msg).await;
+                }
+
+                // Wait for the task to complete
+                let _ = handle.await;
+
+                // Keep the subscription alive until explicitly stopped
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                }
+            }
+        }),
+    )
 }

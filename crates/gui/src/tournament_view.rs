@@ -1,6 +1,10 @@
 //! Tournament view and management
 
-use iced::widget::{button, column, horizontal_rule, pick_list, row, scrollable, text, text_input, vertical_space};
+use crate::board::render_static_board;
+use chess_core::Position;
+use iced::widget::{
+    button, column, horizontal_rule, pick_list, row, scrollable, text, text_input, vertical_space,
+};
 use iced::{Element, Length};
 use tournament::EloTracker;
 
@@ -47,6 +51,14 @@ pub struct TournamentState {
     pub elo_tracker: EloTracker,
     /// Status message
     pub status: String,
+    /// Watch tournament games live
+    pub watch_live: bool,
+    /// Current live game position (when watching)
+    pub live_position: Position,
+    /// Last move in live game (for highlighting)
+    pub live_last_move: Option<(u8, u8)>,
+    /// Current game info (e.g., "Game 3/10: Classical vs Neural")
+    pub live_game_info: String,
 }
 
 impl Default for TournamentState {
@@ -84,6 +96,10 @@ impl TournamentState {
             progress: 0,
             elo_tracker,
             status: "Ready to start tournament".to_string(),
+            watch_live: false,
+            live_position: Position::startpos(),
+            live_last_move: None,
+            live_game_info: String::new(),
         }
     }
 
@@ -102,6 +118,20 @@ pub enum TournamentMessage {
     StartTournament,
     StopTournament,
     RefreshElo,
+    ToggleWatchLive,
+    /// Position update from running tournament
+    PositionUpdate {
+        position: Position,
+        last_move: Option<(u8, u8)>,
+        game_info: String,
+    },
+    /// A game in the tournament finished
+    GameFinished {
+        game_num: u32,
+        result: String,
+    },
+    /// Tournament completed
+    TournamentFinished,
 }
 
 /// Render the tournament view
@@ -126,15 +156,9 @@ pub fn tournament_view(state: &TournamentState) -> Element<'_, TournamentMessage
     .placeholder("Select Engine 2");
 
     let engine_row = row![
-        column![
-            text("Engine 1").size(14),
-            engine1_picker,
-        ].spacing(5),
+        column![text("Engine 1").size(14), engine1_picker,].spacing(5),
         text("vs").size(20),
-        column![
-            text("Engine 2").size(14),
-            engine2_picker,
-        ].spacing(5),
+        column![text("Engine 2").size(14), engine2_picker,].spacing(5),
     ]
     .spacing(20)
     .align_y(iced::Alignment::Center);
@@ -149,14 +173,8 @@ pub fn tournament_view(state: &TournamentState) -> Element<'_, TournamentMessage
         .width(80);
 
     let settings_row = row![
-        column![
-            text("Games").size(14),
-            games_input,
-        ].spacing(5),
-        column![
-            text("Depth").size(14),
-            depth_input,
-        ].spacing(5),
+        column![text("Games").size(14), games_input,].spacing(5),
+        column![text("Depth").size(14), depth_input,].spacing(5),
     ]
     .spacing(20);
 
@@ -170,6 +188,37 @@ pub fn tournament_view(state: &TournamentState) -> Element<'_, TournamentMessage
             .on_press(TournamentMessage::StartTournament)
             .style(button::success)
     };
+
+    // Watch Live toggle button
+    let watch_live_button = if state.watch_live {
+        button(text("👁 Watching Live"))
+            .on_press(TournamentMessage::ToggleWatchLive)
+            .style(button::primary)
+    } else {
+        button(text("👁 Watch Live"))
+            .on_press(TournamentMessage::ToggleWatchLive)
+            .style(button::secondary)
+    };
+
+    let action_row = row![action_button, watch_live_button].spacing(10);
+
+    // Live board view (when watching and tournament is running)
+    let live_board: Element<'_, TournamentMessage> =
+        if state.watch_live && state.running && !state.live_game_info.is_empty() {
+            let board: Element<'static, TournamentMessage> =
+                render_static_board(&state.live_position, state.live_last_move, false);
+            column![
+                text(&state.live_game_info).size(16),
+                vertical_space().height(10),
+                board,
+            ]
+            .spacing(5)
+            .into()
+        } else if state.watch_live && state.running {
+            text("Waiting for game to start...").size(14).into()
+        } else {
+            vertical_space().height(0).into()
+        };
 
     // Progress
     let progress_text = if state.running {
@@ -203,8 +252,7 @@ pub fn tournament_view(state: &TournamentState) -> Element<'_, TournamentMessage
         leaderboard_rows = leaderboard_rows.push(row_widget);
     }
 
-    let leaderboard = scrollable(leaderboard_rows)
-        .height(Length::Fill);
+    let leaderboard = scrollable(leaderboard_rows).height(Length::Fill);
 
     let progress_widget = text(progress_text).size(14);
 
@@ -216,10 +264,12 @@ pub fn tournament_view(state: &TournamentState) -> Element<'_, TournamentMessage
         vertical_space().height(15),
         settings_row,
         vertical_space().height(15),
-        action_button,
+        action_row,
         vertical_space().height(10),
         progress_widget,
-        vertical_space().height(30),
+        vertical_space().height(10),
+        live_board,
+        vertical_space().height(20),
         horizontal_rule(2),
         vertical_space().height(20),
         row![leaderboard_title, horizontal_space(), refresh_btn].spacing(10),
