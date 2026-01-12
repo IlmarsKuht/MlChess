@@ -11,6 +11,8 @@ pub struct GameState {
     pub position: Position,
     /// Move history
     pub moves: Vec<MoveRecord>,
+    /// Position hash history for threefold repetition detection
+    pub position_history: Vec<u64>,
     /// Currently selected square (for move input)
     pub selected_square: Option<u8>,
     /// Legal moves from selected square
@@ -208,9 +210,12 @@ impl Default for GameState {
 
 impl GameState {
     pub fn new() -> Self {
+        let position = Position::startpos();
+        let initial_hash = position.position_hash();
         Self {
-            position: Position::startpos(),
+            position,
             moves: Vec::new(),
+            position_history: vec![initial_hash],
             selected_square: None,
             legal_moves_from_selected: HashSet::new(),
             last_move: None,
@@ -298,6 +303,9 @@ impl GameState {
         self.selected_square = None;
         self.legal_moves_from_selected.clear();
 
+        // Add position hash to history for repetition detection
+        self.position_history.push(self.position.position_hash());
+
         // Start clock for next player
         self.clock.start(self.position.side_to_move);
 
@@ -361,6 +369,17 @@ impl GameState {
         san
     }
 
+    /// Check if the current position has occurred at least 3 times (threefold repetition)
+    fn is_threefold_repetition(&self) -> bool {
+        let current_hash = self.position.position_hash();
+        let count = self
+            .position_history
+            .iter()
+            .filter(|&&h| h == current_hash)
+            .count();
+        count >= 3
+    }
+
     /// Check if the game has ended
     fn check_game_end(&mut self) {
         // Check for timeout
@@ -389,7 +408,23 @@ impl GameState {
                 // Stalemate
                 self.result = GameResult::Draw;
             }
-        } else if self.position.halfmove_clock >= 100 {
+            return;
+        }
+
+        // Check for fifty-move rule
+        if self.position.is_fifty_move_draw() {
+            self.result = GameResult::Draw;
+            return;
+        }
+
+        // Check for threefold repetition
+        if self.is_threefold_repetition() {
+            self.result = GameResult::Draw;
+            return;
+        }
+
+        // Check for insufficient material
+        if self.position.is_insufficient_material() {
             self.result = GameResult::Draw;
         }
     }

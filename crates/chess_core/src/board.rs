@@ -512,4 +512,142 @@ impl Position {
             self.set_piece(to, undo.captured);
         }
     }
+
+    /// Computes a hash of the position for repetition detection.
+    ///
+    /// This hash includes:
+    /// - Piece positions
+    /// - Side to move
+    /// - Castling rights
+    /// - En passant square
+    ///
+    /// It does NOT include halfmove clock or fullmove number, as those
+    /// don't affect position identity for repetition purposes.
+    pub fn position_hash(&self) -> u64 {
+        fn mix(mut h: u64, x: u64) -> u64 {
+            h ^= x;
+            h = h.wrapping_mul(0x100000001b3);
+            h
+        }
+
+        let mut h = 0xcbf29ce484222325u64;
+
+        // Side to move
+        h = mix(
+            h,
+            match self.side_to_move {
+                Color::White => 1,
+                Color::Black => 2,
+            },
+        );
+
+        // Castling rights
+        h = mix(h, if self.castling.wk { 3 } else { 5 });
+        h = mix(h, if self.castling.wq { 7 } else { 11 });
+        h = mix(h, if self.castling.bk { 13 } else { 17 });
+        h = mix(h, if self.castling.bq { 19 } else { 23 });
+
+        // En passant square
+        if let Some(ep) = self.en_passant {
+            h = mix(h, 29 + ep as u64);
+        }
+
+        // Board state
+        for (i, sq) in self.board.iter().enumerate() {
+            let v = if let Some(pc) = sq {
+                (i as u64) ^ ((pc.color.idx() as u64) << 6) ^ ((pc.kind as u64) << 3)
+            } else {
+                i as u64
+            };
+            h = mix(h, v);
+        }
+
+        h
+    }
+
+    /// Check if the position is a draw due to insufficient material.
+    ///
+    /// Returns true for:
+    /// - King vs King
+    /// - King + Bishop vs King
+    /// - King + Knight vs King
+    /// - King + Bishop vs King + Bishop (same color bishops)
+    pub fn is_insufficient_material(&self) -> bool {
+        let mut white_knights = 0;
+        let mut white_bishops = 0;
+        let mut white_bishop_on_light = false;
+        let mut black_knights = 0;
+        let mut black_bishops = 0;
+        let mut black_bishop_on_light = false;
+        let mut has_other_pieces = false;
+
+        for sq in 0..64 {
+            if let Some(piece) = self.board[sq] {
+                match piece.kind {
+                    PieceKind::King => {} // Kings are always present
+                    PieceKind::Knight => {
+                        if piece.color == Color::White {
+                            white_knights += 1;
+                        } else {
+                            black_knights += 1;
+                        }
+                    }
+                    PieceKind::Bishop => {
+                        let is_light_square = (sq / 8 + sq % 8) % 2 == 1;
+                        if piece.color == Color::White {
+                            white_bishops += 1;
+                            if is_light_square {
+                                white_bishop_on_light = true;
+                            }
+                        } else {
+                            black_bishops += 1;
+                            if is_light_square {
+                                black_bishop_on_light = true;
+                            }
+                        }
+                    }
+                    PieceKind::Pawn | PieceKind::Rook | PieceKind::Queen => {
+                        has_other_pieces = true;
+                    }
+                }
+            }
+        }
+
+        // If there are pawns, rooks, or queens, it's not insufficient material
+        if has_other_pieces {
+            return false;
+        }
+
+        let total_knights = white_knights + black_knights;
+        let total_bishops = white_bishops + black_bishops;
+
+        // King vs King
+        if total_knights == 0 && total_bishops == 0 {
+            return true;
+        }
+
+        // King + single minor piece vs King
+        if total_knights + total_bishops == 1 {
+            return true;
+        }
+
+        // King + Bishop vs King + Bishop (same color squares)
+        if total_knights == 0
+            && white_bishops == 1
+            && black_bishops == 1
+            && white_bishop_on_light == black_bishop_on_light
+        {
+            return true;
+        }
+
+        false
+    }
+
+    /// Check for fifty-move rule draw.
+    ///
+    /// Returns true if 50 moves (100 half-moves) have been made without
+    /// a pawn move or capture.
+    pub fn is_fifty_move_draw(&self) -> bool {
+        self.halfmove_clock >= 100
+    }
 }

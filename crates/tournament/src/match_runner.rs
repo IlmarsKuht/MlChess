@@ -58,11 +58,7 @@ impl MatchRunner {
     /// Run a match between two engines
     ///
     /// Returns the result from engine1's perspective
-    pub fn run_match(
-        &self,
-        engine1: &mut dyn Engine,
-        engine2: &mut dyn Engine,
-    ) -> MatchResult {
+    pub fn run_match(&self, engine1: &mut dyn Engine, engine2: &mut dyn Engine) -> MatchResult {
         let mut result = MatchResult::new();
 
         for game_num in 0..self.config.num_games {
@@ -110,14 +106,13 @@ impl MatchRunner {
     }
 
     /// Play a single game, returns result from white's perspective
-    fn play_game(
-        &self,
-        white: &mut dyn Engine,
-        black: &mut dyn Engine,
-    ) -> GameResult {
+    fn play_game(&self, white: &mut dyn Engine, black: &mut dyn Engine) -> GameResult {
         let mut pos = Position::startpos();
         white.new_game();
         black.new_game();
+
+        // Track position hashes for threefold repetition detection
+        let mut position_history = vec![pos.position_hash()];
 
         for _move_num in 0..self.config.max_moves {
             // Create fresh search limits for each move (resets the clock)
@@ -132,6 +127,7 @@ impl MatchRunner {
             match result.best_move {
                 Some(mv) => {
                     pos.make_move(mv);
+                    position_history.push(pos.position_hash());
                 }
                 None => {
                     // No legal moves - checkmate or stalemate
@@ -152,13 +148,25 @@ impl MatchRunner {
                 }
             }
 
-            // Check for draws
-            if pos.halfmove_clock >= 100 {
-                return GameResult::Draw; // 50-move rule
+            // Check for fifty-move rule
+            if pos.is_fifty_move_draw() {
+                return GameResult::Draw;
             }
 
-            // Simple repetition check (would need proper implementation)
-            // For now, rely on 50-move rule and max moves limit
+            // Check for threefold repetition
+            let current_hash = pos.position_hash();
+            let repetition_count = position_history
+                .iter()
+                .filter(|&&h| h == current_hash)
+                .count();
+            if repetition_count >= 3 {
+                return GameResult::Draw;
+            }
+
+            // Check for insufficient material
+            if pos.is_insufficient_material() {
+                return GameResult::Draw;
+            }
         }
 
         // Max moves reached

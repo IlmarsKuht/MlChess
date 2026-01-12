@@ -140,14 +140,18 @@ fn negamax(
     }
 
     // Immediate draw conditions
-    if pos.halfmove_clock >= 100 {
-        return (0, false); // 50-move rule reached
+    if pos.is_fifty_move_draw() {
+        return (0, false);
     }
 
     let curr_key = *history.last().unwrap_or(&position_key(pos));
     let repeats = history.iter().filter(|&&k| k == curr_key).count();
     if repeats >= 3 {
         return (0, false); // threefold repetition draw
+    }
+
+    if pos.is_insufficient_material() {
+        return (0, false);
     }
 
     let mut moves = Vec::with_capacity(64);
