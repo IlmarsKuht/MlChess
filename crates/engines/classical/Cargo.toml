@@ -6,4 +6,4 @@ description = "Classical alpha-beta search chess engine with material evaluation
 authors = ["ML-chess"]
 
 [dependencies]
-chess_core = { path = "../chess_core" }
+chess_core = { path = "../../chess_core" }

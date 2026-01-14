@@ -2,12 +2,13 @@
 //!
 //! Run matches between engines and track Elo ratings.
 
-use classical_engine::ClassicalEngine;
-use ml_engine::NeuralEngine;
-use tournament::{EloTracker, MatchConfig, MatchRunner, TournamentConfig, TournamentResults};
 use chess_core::Engine;
+use classical_engine::ClassicalEngine;
+use neural_engine::NeuralEngine;
+use random_engine::RandomEngine;
 use std::env;
 use std::time::Duration;
+use tournament::{EloTracker, MatchConfig, MatchRunner, TournamentConfig, TournamentResults};
 
 fn print_usage() {
     println!("ML-chess Tournament Runner");
@@ -26,6 +27,7 @@ fn print_usage() {
     println!("  classical     - Alpha-beta with material eval");
     println!("  neural        - Neural network (random fallback)");
     println!("  neural:vNNN   - Neural network with specific model version");
+    println!("  random        - Random move selection (baseline)");
     println!();
     println!("Examples:");
     println!("  tournament match classical neural --games 20 --depth 4");
@@ -51,6 +53,7 @@ fn create_engine(spec: &str) -> Box<dyn Engine> {
                 Box::new(NeuralEngine::new())
             }
         }
+        "random" | "rand" => Box::new(RandomEngine::new()),
         _ => {
             eprintln!("Unknown engine: {}", spec);
             Box::new(ClassicalEngine::new())

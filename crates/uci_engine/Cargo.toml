@@ -5,5 +5,6 @@ edition = "2021"
 
 [dependencies]
 chess_core = { path = "../chess_core" }
-classical_engine = { path = "../classical_engine" }
-ml_engine = { path = "../ml_engine" }
+classical_engine = { path = "../engines/classical" }
+neural_engine = { path = "../engines/neural" }
+random_engine = { path = "../engines/random" }

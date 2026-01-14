@@ -522,7 +522,8 @@ dependencies = [
  "chess_core",
  "classical_engine",
  "iced",
- "ml_engine",
+ "neural_engine",
+ "random_engine",
  "serde",
  "serde_json",
  "tokio",
@@ -2080,14 +2081,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ml_engine"
-version = "0.1.0"
-dependencies = [
- "chess_core",
- "tract-onnx",
-]
-
-[[package]]
 name = "naga"
 version = "0.19.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2159,6 +2152,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee6cda3051665f1fb8d9e08fc35c96d5a244fb1be711a03b71118828afc9a873"
 dependencies = [
  "jni-sys",
+]
+
+[[package]]
+name = "neural_engine"
+version = "0.1.0"
+dependencies = [
+ "chess_core",
+ "tract-onnx",
 ]
 
 [[package]]
@@ -2994,6 +2995,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32cb0b9bc82b0a0876c2dd994a7e7a2683d3e7390ca40e6886785ef0c7e3ee31"
 dependencies = [
  "num-traits",
+ "rand",
+]
+
+[[package]]
+name = "random_engine"
+version = "0.1.0"
+dependencies = [
+ "chess_core",
  "rand",
 ]
 
@@ -3898,8 +3907,9 @@ version = "0.1.0"
 dependencies = [
  "chess_core",
  "classical_engine",
- "ml_engine",
+ "neural_engine",
  "rand",
+ "random_engine",
  "serde",
  "serde_json",
  "toml",
@@ -4120,7 +4130,8 @@ version = "0.1.0"
 dependencies = [
  "chess_core",
  "classical_engine",
- "ml_engine",
+ "neural_engine",
+ "random_engine",
 ]
 
 [[package]]

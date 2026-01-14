@@ -29,6 +29,11 @@ Purpose
 
 6. **NO comments in code unless absolutely essential.** Rely on clear, self-documenting code; only keep comments that convey critical rationale that cannot be expressed in code.
 
+7. **Tests must be in separate files.** Do NOT use inline `#[cfg(test)] mod tests { ... }` blocks. Instead:
+   - Unit tests go in `src/<module>_tests.rs` files (e.g., `src/board_tests.rs` for `src/board.rs`)
+   - Integration tests go in `tests/` directories
+   - Include test modules via `#[cfg(test)] mod board_tests;` in the parent module
+
 ### Before Completing Any Work
 
 1. Run `cargo build --workspace` — fix ALL warnings
@@ -49,9 +54,11 @@ Purpose
 
 Workspace crates:
 - `crates/chess_core` — Core rules, bitboard representation, move generation, perft harness, zobrist hashing, UCI helpers, `SearchLimits`/`TimeControl`, and the shared `Engine` trait. No engine-specific logic lives here.
-- `crates/classical_engine` — Deterministic negamax with alpha-beta pruning and lightweight material evaluation. Obeys `TimeControl` for early stop and serves as the baseline engine implementation.
-- `crates/ml_engine` — NeuralEngine with optional `onnx` feature for loading ONNX models; falls back to material/random play when no model is loaded. Encodes positions via `features` and respects `SearchLimits`.
-- `crates/uci_engine` — Binary that speaks the UCI protocol and can switch between Classical and Neural engines at runtime; handles depth/movetime options and iterative deepening.
+- `crates/engines/` — All engine implementations live here:
+  - `classical` — Deterministic negamax with alpha-beta pruning and lightweight material evaluation. Obeys `TimeControl` for early stop and serves as the baseline engine implementation.
+  - `neural` — NeuralEngine with optional `onnx` feature for loading ONNX models; falls back to random play when no model is loaded. Encodes positions via `features` and respects `SearchLimits`.
+  - `random` — Simple random move engine for testing and baseline comparisons.
+- `crates/uci_engine` — Binary that speaks the UCI protocol and can switch between Classical, Neural, and Random engines at runtime; handles depth/movetime options and iterative deepening.
 - `crates/tournament` — CLI for running matches/gauntlets between engines, aggregating results, and tracking Elo.
 - `crates/gui` — Iced desktop UI for playing games, running local tournaments, and viewing Elo history.
 
@@ -60,8 +67,9 @@ Key files:
 - `chess_core/src/board.rs`, `types.rs` — Position representation and core enums.
 - `chess_core/src/movegen.rs` — Legal move generation and perft helpers.
 - `chess_core/src/time_control.rs` — Time control and search limit helpers.
-- `classical_engine/src/search.rs` — Negamax with alpha-beta pruning and draw detection.
-- `ml_engine/src/lib.rs` — NeuralEngine setup, model loading (when `onnx` is enabled), and search glue.
+- `engines/classical/src/search.rs` — Negamax with alpha-beta pruning and draw detection.
+- `engines/neural/src/lib.rs` — NeuralEngine setup, model loading (when `onnx` is enabled), and search glue.
+- `engines/random/src/lib.rs` — Random move engine implementation.
 - `tournament/src/match_runner.rs`, `tournament/src/elo.rs` — Match orchestration and Elo calculations.
 - `uci_engine/src/main.rs` — UCI command loop and engine selection.
 - `gui/src/app.rs` — Iced app state, routing, and board/tournament views.
@@ -128,9 +136,9 @@ Training workflow:
 ## What to look for when triaging bugs
 
 - Perft mismatch → check `movegen.rs`
-- Search/eval issues → check `classical_engine/src/search.rs` or `ml_engine/src/lib.rs`
+- Search/eval issues → check `engines/classical/src/search.rs` or `engines/neural/src/lib.rs`
 - UCI protocol issues → check `uci_engine/src/main.rs`
-- Model loading issues → check `ml_engine/src/onnx_engine.rs`
+- Model loading issues → check `engines/neural/src/onnx_engine.rs`
 
 ## Search tips (code patterns to grep)
 

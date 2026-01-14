@@ -6,10 +6,12 @@
 //! Supports multiple engine backends:
 //! - Classical: Alpha-beta search with material evaluation
 //! - Neural: Neural network-based evaluation (requires trained model)
+//! - Random: Random move selection (for testing)
 
 use chess_core::{move_to_uci, set_position_from_uci, Engine, Position, SearchLimits};
 use classical_engine::ClassicalEngine;
-use ml_engine::NeuralEngine;
+use neural_engine::NeuralEngine;
+use random_engine::RandomEngine;
 use std::io::{self, BufRead, Write};
 use std::time::Duration;
 
@@ -18,6 +20,7 @@ use std::time::Duration;
 enum EngineType {
     Classical,
     Neural,
+    Random,
 }
 
 impl EngineType {
@@ -25,6 +28,7 @@ impl EngineType {
         match s.to_lowercase().as_str() {
             "classical" | "classic" | "alpha-beta" => Some(EngineType::Classical),
             "neural" | "nn" | "ml" => Some(EngineType::Neural),
+            "random" | "rand" => Some(EngineType::Random),
             _ => None,
         }
     }
@@ -35,6 +39,7 @@ fn create_engine(engine_type: EngineType) -> Box<dyn Engine> {
     match engine_type {
         EngineType::Classical => Box::new(ClassicalEngine::new()),
         EngineType::Neural => Box::new(NeuralEngine::new()),
+        EngineType::Random => Box::new(RandomEngine::new()),
     }
 }
 
@@ -66,7 +71,7 @@ fn main() {
                 writeln!(stdout, "option name Depth type spin default 3 min 1 max 20").ok();
                 writeln!(
                     stdout,
-                    "option name Engine type combo default Classical var Classical var Neural"
+                    "option name Engine type combo default Classical var Classical var Neural var Random"
                 )
                 .ok();
                 writeln!(stdout, "option name ModelVersion type string default v001").ok();

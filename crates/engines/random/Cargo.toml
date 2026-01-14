@@ -1,0 +1,10 @@
+[package]
+name = "random_engine"
+version = "0.1.0"
+edition = "2021"
+description = "Random move chess engine for testing and baseline comparisons"
+authors = ["ML-chess"]
+
+[dependencies]
+chess_core = { path = "../../chess_core" }
+rand = { workspace = true }

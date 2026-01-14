@@ -84,6 +84,10 @@ impl TournamentState {
                 id: "neural:v001".to_string(),
                 display_name: "Neural v001".to_string(),
             },
+            EngineOption {
+                id: "random".to_string(),
+                display_name: "Random (Baseline)".to_string(),
+            },
         ];
 
         let elo_tracker = EloTracker::load("tournament_elo.json").unwrap_or_default();

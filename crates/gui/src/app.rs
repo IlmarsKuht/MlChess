@@ -13,7 +13,8 @@ use iced::widget::{
     text_input, vertical_space,
 };
 use iced::{Element, Length, Subscription, Task, Theme};
-use ml_engine::NeuralEngine;
+use neural_engine::NeuralEngine;
+use random_engine::RandomEngine;
 use std::time::Duration;
 
 /// Application tabs
@@ -31,6 +32,7 @@ pub enum PlayerType {
     Human,
     Classical,
     Neural,
+    Random,
 }
 
 impl std::fmt::Display for PlayerType {
@@ -39,6 +41,7 @@ impl std::fmt::Display for PlayerType {
             PlayerType::Human => write!(f, "Human"),
             PlayerType::Classical => write!(f, "Classical Engine"),
             PlayerType::Neural => write!(f, "Neural Engine"),
+            PlayerType::Random => write!(f, "Random Engine"),
         }
     }
 }
@@ -395,6 +398,7 @@ impl ChessApp {
                     let mut engine: Box<dyn Engine> = match player_type {
                         PlayerType::Classical => Box::new(ClassicalEngine::new()),
                         PlayerType::Neural => Box::new(NeuralEngine::new()),
+                        PlayerType::Random => Box::new(RandomEngine::new()),
                         PlayerType::Human => unreachable!(),
                     };
 
@@ -641,7 +645,12 @@ impl ChessApp {
 
     /// Render the control panel
     fn control_panel(&self) -> Element<'_, Message> {
-        let player_types = vec![PlayerType::Human, PlayerType::Classical, PlayerType::Neural];
+        let player_types = vec![
+            PlayerType::Human,
+            PlayerType::Classical,
+            PlayerType::Neural,
+            PlayerType::Random,
+        ];
 
         let time_presets = vec![
             TimePreset::Bullet1_0,
@@ -825,6 +834,7 @@ fn create_engine(id: &str) -> Box<dyn Engine> {
     match id {
         "classical" => Box::new(ClassicalEngine::new()),
         "neural" | "neural:v001" => Box::new(NeuralEngine::new()),
+        "random" => Box::new(RandomEngine::new()),
         _ => Box::new(ClassicalEngine::new()),
     }
 }

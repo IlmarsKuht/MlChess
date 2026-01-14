@@ -1,8 +1,9 @@
 [workspace]
 members = [
   "crates/chess_core",
-  "crates/classical_engine",
-  "crates/ml_engine",
+  "crates/engines/classical",
+  "crates/engines/neural",
+  "crates/engines/random",
   "crates/tournament",
   "crates/uci_engine",
   "crates/gui",
