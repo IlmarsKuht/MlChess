@@ -45,9 +45,12 @@ class ConvValueNet(nn.Module):
     
     Input: (batch, 12, 8, 8) tensor representing piece planes
     Output: Single value in [-1, 1]
+    
+    Default configuration (~2.5M parameters) is designed to be a good
+    starting point for training competitive chess evaluation.
     """
     
-    def __init__(self, num_filters=64, num_blocks=4):
+    def __init__(self, num_filters=128, num_blocks=8):
         super().__init__()
         
         # Initial convolution
@@ -59,11 +62,12 @@ class ConvValueNet(nn.Module):
             ResidualBlock(num_filters) for _ in range(num_blocks)
         ])
         
-        # Value head
-        self.conv_val = nn.Conv2d(num_filters, 1, kernel_size=1)
-        self.bn_val = nn.BatchNorm2d(1)
-        self.fc_val1 = nn.Linear(64, 128)
-        self.fc_val2 = nn.Linear(128, 1)
+        # Value head with larger capacity
+        self.conv_val = nn.Conv2d(num_filters, 32, kernel_size=1)
+        self.bn_val = nn.BatchNorm2d(32)
+        self.fc_val1 = nn.Linear(32 * 64, 256)
+        self.fc_val2 = nn.Linear(256, 128)
+        self.fc_val3 = nn.Linear(128, 1)
     
     def forward(self, x):
         # Reshape if flat input
@@ -79,9 +83,10 @@ class ConvValueNet(nn.Module):
         
         # Value head
         v = F.relu(self.bn_val(self.conv_val(x)))
-        v = v.view(-1, 64)
+        v = v.view(-1, 32 * 64)
         v = F.relu(self.fc_val1(v))
-        v = torch.tanh(self.fc_val2(v))
+        v = F.relu(self.fc_val2(v))
+        v = torch.tanh(self.fc_val3(v))
         
         return v
 
@@ -184,17 +189,25 @@ if __name__ == "__main__":
     x = torch.randn(4, 768)
     y = model(x)
     print(f"  Input: {x.shape}, Output: {y.shape}")
+    print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}")
     
-    print("Testing ConvValueNet...")
+    print("\nTesting ConvValueNet...")
     model = ConvValueNet()
     x = torch.randn(4, 12, 8, 8)
     y = model(x)
     print(f"  Input: {x.shape}, Output: {y.shape}")
+    print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}")
     
-    print("Testing PolicyValueNet...")
+    print("\nTesting ConvValueNet with flat input...")
+    x_flat = torch.randn(4, 768)
+    y = model(x_flat)
+    print(f"  Input: {x_flat.shape}, Output: {y.shape}")
+    
+    print("\nTesting PolicyValueNet...")
     model = PolicyValueNet()
     x = torch.randn(4, 12, 8, 8)
     p, v = model(x)
     print(f"  Input: {x.shape}, Policy: {p.shape}, Value: {v.shape}")
+    print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}")
     
     print("\nAll models working!")

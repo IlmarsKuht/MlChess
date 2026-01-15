@@ -129,7 +129,8 @@ impl NeuralEngine {
     fn evaluate(&self, pos: &Position) -> i32 {
         #[cfg(feature = "onnx")]
         if let Some(ref model) = self.model {
-            let features = features::extract_features(pos);
+            // Use relative features so NN always sees position from side-to-move perspective
+            let features = features::extract_features_relative(pos);
             return model.evaluate(&features);
         }
 
@@ -159,7 +160,7 @@ impl NeuralEngine {
         }
     }
 
-    /// Simple search using NN evaluation with time control.
+    /// Search using negamax with alpha-beta pruning and NN evaluation.
     ///
     /// Returns (best_move, score, stopped) where stopped indicates early termination.
     fn search_internal(
@@ -176,53 +177,41 @@ impl NeuralEngine {
             return (None, false);
         }
 
-        if depth == 0 {
-            // At depth 0, just pick best by static eval
-            let mut best = moves[0];
-            let mut best_score = i32::MIN + 1; // +1 to avoid overflow on negation
-            for mv in moves {
-                // Check time periodically
-                if tc.should_check_time(self.nodes) && tc.check_time() {
-                    return (Some((best, best_score)), true);
-                }
-
-                let undo = tmp.make_move(mv);
-                self.nodes += 1;
-                let score = -self.evaluate(&tmp);
-                tmp.unmake_move(mv, undo);
-                if score > best_score {
-                    best_score = score;
-                    best = mv;
-                }
-            }
-            return (Some((best, best_score)), false);
-        }
-
-        // Simple 1-ply search with NN eval
         let mut best = moves[0];
-        let mut best_score = i32::MIN + 1; // +1 to avoid overflow on negation
+        let mut best_score = i32::MIN + 1;
+        let mut stopped = false;
+
+        // Track position history for repetition detection
+        let mut history = Vec::with_capacity((depth as usize) + 1);
+        history.push(tmp.position_hash());
 
         for mv in moves {
-            // Check time before each root move
+            // Check time before starting each root move
             if tc.should_check_time(self.nodes) && tc.check_time() {
-                return (Some((best, best_score)), true);
+                stopped = true;
+                break;
             }
 
             let undo = tmp.make_move(mv);
+            history.push(tmp.position_hash());
             self.nodes += 1;
 
-            let (score, stopped) = if depth > 1 {
-                // Recurse
-                let (result, stopped) = self.search_internal(&tmp, depth - 1, tc);
-                (-result.map(|(_, s)| s).unwrap_or(0), stopped)
-            } else {
-                (-self.evaluate(&tmp), false)
-            };
+            let (score, was_stopped) = self.negamax(
+                &mut tmp,
+                depth.saturating_sub(1),
+                i32::MIN / 2,
+                i32::MAX / 2,
+                &mut history,
+                tc,
+            );
+            let score = -score;
 
+            history.pop();
             tmp.unmake_move(mv, undo);
 
-            if stopped {
-                return (Some((best, best_score)), true);
+            if was_stopped {
+                stopped = true;
+                break;
             }
 
             if score > best_score {
@@ -231,7 +220,87 @@ impl NeuralEngine {
             }
         }
 
-        (Some((best, best_score)), false)
+        (Some((best, best_score)), stopped)
+    }
+
+    /// Recursive negamax search with alpha-beta pruning.
+    ///
+    /// Returns (score, stopped) where stopped indicates if search was aborted.
+    fn negamax(
+        &mut self,
+        pos: &mut Position,
+        depth: u8,
+        mut alpha: i32,
+        beta: i32,
+        history: &mut Vec<u64>,
+        tc: &TimeControl,
+    ) -> (i32, bool) {
+        // Check time periodically
+        if tc.should_check_time(self.nodes) && tc.check_time() {
+            return (0, true);
+        }
+
+        // Draw detection: fifty-move rule
+        if pos.is_fifty_move_draw() {
+            return (0, false);
+        }
+
+        // Draw detection: threefold repetition
+        let curr_key = *history.last().unwrap_or(&pos.position_hash());
+        let repeats = history.iter().filter(|&&k| k == curr_key).count();
+        if repeats >= 3 {
+            return (0, false);
+        }
+
+        // Draw detection: insufficient material
+        if pos.is_insufficient_material() {
+            return (0, false);
+        }
+
+        let mut moves = Vec::with_capacity(64);
+        legal_moves_into(pos, &mut moves);
+
+        if moves.is_empty() {
+            if pos.in_check(pos.side_to_move) {
+                return (-100_000, false); // Checkmate
+            }
+            return (0, false); // Stalemate
+        }
+
+        // Leaf node: use NN evaluation
+        if depth == 0 {
+            return (self.evaluate(pos), false);
+        }
+
+        let mut best = i32::MIN + 1;
+
+        for mv in moves {
+            let undo = pos.make_move(mv);
+            history.push(pos.position_hash());
+            self.nodes += 1;
+
+            let (score, stopped) = self.negamax(pos, depth - 1, -beta, -alpha, history, tc);
+            let score = -score;
+
+            history.pop();
+            pos.unmake_move(mv, undo);
+
+            if stopped {
+                return (best, true);
+            }
+
+            if score > best {
+                best = score;
+            }
+            if best > alpha {
+                alpha = best;
+            }
+            if alpha >= beta {
+                break; // Beta cutoff
+            }
+        }
+
+        (best, false)
     }
 }
 
@@ -283,4 +352,3 @@ impl Engine for NeuralEngine {
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod lib_tests;
-

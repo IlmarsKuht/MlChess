@@ -24,3 +24,22 @@
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.eggs/
+
+# Training artifacts
+training/bin/
+training/data/*.pgn
+training/data/*.npz
+training/checkpoints/
+training/runs/
+
+# Large model files (track metadata.toml only)
+models/*/model.onnx
+models/*/model.pt
