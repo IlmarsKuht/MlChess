@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useState } from "react";
 
 import { apiUrl, fetchJson } from "./app/api";
+import { useConfirmedLiveMatch } from "./app/live";
 import {
   BoardView,
   EmptyState,
@@ -22,7 +23,6 @@ import type {
   GameRecord,
   HumanPlayerProfile,
   LeaderboardEntry,
-  LiveGameState,
   MatchSeries,
   ReplayPayload,
   Variant,
@@ -89,7 +89,6 @@ export default function App() {
   const [invalidBoardSquare, setInvalidBoardSquare] = useState("");
   const [isSubmittingHumanMove, setIsSubmittingHumanMove] = useState(false);
   const [selectedLiveMatchId, setSelectedLiveMatchId] = useState("");
-  const [rawLiveGame, setRawLiveGame] = useState<LiveGameState | null>(null);
   const [liveNowMs, setLiveNowMs] = useState(() => Date.now());
   const [displayedLiveFrameCount, setDisplayedLiveFrameCount] = useState(0);
   const [selectedLivePly, setSelectedLivePly] = useState(0);
@@ -107,6 +106,7 @@ export default function App() {
   const activeView = route.page === "app" ? route.view : route.page === "engine" ? "setup" : "live_duel";
   const agentNameById = Object.fromEntries(agents.map((agent) => [agent.id, agent.name]));
   const poolNameById = Object.fromEntries(pools.map((pool) => [pool.id, pool.name]));
+  const poolById = Object.fromEntries(pools.map((pool) => [pool.id, pool]));
   const versionNameById = Object.fromEntries(
     versions.map((version) => [
       version.id,
@@ -125,6 +125,48 @@ export default function App() {
   const replayFrames = buildReplayFrames(replay);
   const currentFen = replayFrames[Math.min(selectedPly, Math.max(replayFrames.length - 1, 0))];
   const boardSquares = currentFen ? fenToBoard(currentFen) : [];
+  const confirmedLiveSnapshot = useConfirmedLiveMatch(selectedLiveMatchId);
+  const selectedLiveMatch = matches.find((match) => match.id === selectedLiveMatchId) ?? null;
+  const liveVariant = selectedLiveMatch ? poolById[selectedLiveMatch.pool_id]?.variant ?? "standard" : "standard";
+  const rawLiveGame =
+    confirmedLiveSnapshot && selectedLiveMatch
+      ? {
+          match_id: confirmedLiveSnapshot.match_id,
+          tournament_id: selectedLiveMatch.tournament_id,
+          pool_id: selectedLiveMatch.pool_id,
+          variant: liveVariant,
+          start_fen: confirmedLiveSnapshot.fen,
+          current_fen: confirmedLiveSnapshot.fen,
+          moves_uci: confirmedLiveSnapshot.moves,
+          white_time_left_ms: confirmedLiveSnapshot.white_time_left_ms,
+          black_time_left_ms: confirmedLiveSnapshot.black_time_left_ms,
+          status: confirmedLiveSnapshot.status,
+          result: confirmedLiveSnapshot.result === "none" ? null : confirmedLiveSnapshot.result,
+          termination: confirmedLiveSnapshot.termination === "none" ? null : confirmedLiveSnapshot.termination,
+          updated_at: new Date(confirmedLiveSnapshot.server_now_unix_ms).toISOString(),
+          live_frames: [
+            {
+              ply: confirmedLiveSnapshot.moves.length,
+              fen: confirmedLiveSnapshot.fen,
+              move_uci: confirmedLiveSnapshot.moves.at(-1) ?? null,
+              white_time_left_ms: confirmedLiveSnapshot.white_time_left_ms,
+              black_time_left_ms: confirmedLiveSnapshot.black_time_left_ms,
+              updated_at: new Date(confirmedLiveSnapshot.server_now_unix_ms).toISOString(),
+              side_to_move: confirmedLiveSnapshot.side_to_move === "black" ? "black" : "white",
+              status: confirmedLiveSnapshot.status,
+              result: confirmedLiveSnapshot.result === "none" ? null : confirmedLiveSnapshot.result,
+              termination: confirmedLiveSnapshot.termination === "none" ? null : confirmedLiveSnapshot.termination
+            }
+          ],
+          white_participant: selectedLiveMatch.white_participant,
+          black_participant: selectedLiveMatch.black_participant,
+          interactive: selectedLiveMatch.interactive,
+          human_turn:
+            selectedLiveMatch.interactive &&
+            ((selectedLiveMatch.white_participant.kind === "human_player" && confirmedLiveSnapshot.side_to_move === "white") ||
+              (selectedLiveMatch.black_participant.kind === "human_player" && confirmedLiveSnapshot.side_to_move === "black"))
+        }
+      : null;
 
   const allLiveFrames = rawLiveGame?.live_frames ?? [];
   const revealedLiveFrames = allLiveFrames.slice(0, displayedLiveFrameCount);
@@ -155,7 +197,6 @@ export default function App() {
   const visibleLiveResult = visibleLiveFrame?.result ?? null;
   const visibleLiveTermination = visibleLiveFrame?.termination ?? null;
   const liveSideToMove = visibleLiveFrame?.side_to_move ?? "white";
-  const selectedLiveMatch = matches.find((match) => match.id === selectedLiveMatchId) ?? null;
   const selectedEngineVersion =
     route.page === "engine" ? versions.find((version) => version.id === route.engineId) ?? null : null;
   const liveWhiteParticipant = rawLiveGame?.white_participant ?? selectedLiveMatch?.white_participant ?? null;
@@ -326,7 +367,6 @@ export default function App() {
 
     if (runningMatches.length === 0) {
       setSelectedLiveMatchId("");
-      setRawLiveGame(null);
       setDisplayedLiveFrameCount(0);
       setSelectedLivePly(0);
       setIsLiveFollowing(true);
@@ -352,145 +392,6 @@ export default function App() {
       // Ignore storage failures in sandboxed or private contexts.
     }
   }, [selectedLiveMatchId]);
-
-  useEffect(() => {
-    if (!selectedLiveMatchId) {
-      setRawLiveGame(null);
-      return;
-    }
-
-    let cancelled = false;
-    let reconnectTimer: number | null = null;
-    let eventSource: EventSource | null = null;
-    let terminalStateSeen = false;
-    let pollTimer: number | null = null;
-
-    const closeStream = () => {
-      if (eventSource) {
-        eventSource.close();
-        eventSource = null;
-      }
-    };
-
-    const loadLiveSnapshot = async () => {
-      try {
-        const state = await fetchJson<LiveGameState>(`/matches/${selectedLiveMatchId}/live`);
-        if (!cancelled) {
-          setRawLiveGame(state);
-          if (isTerminalLiveStatus(state.status)) {
-            terminalStateSeen = true;
-          }
-        }
-      } catch {
-        if (!cancelled && !terminalStateSeen) {
-          setRawLiveGame(null);
-        }
-      }
-    };
-
-    const schedulePoll = () => {
-      if (cancelled || terminalStateSeen || pollTimer !== null) {
-        return;
-      }
-
-      pollTimer = window.setTimeout(() => {
-        pollTimer = null;
-        void loadLiveSnapshot().finally(() => {
-          schedulePoll();
-        });
-      }, 2000);
-    };
-
-    const scheduleReconnect = () => {
-      if (cancelled || terminalStateSeen || reconnectTimer !== null) {
-        return;
-      }
-
-      reconnectTimer = window.setTimeout(() => {
-        reconnectTimer = null;
-        connectStream();
-      }, 1000);
-    };
-
-    const connectStream = () => {
-      if (cancelled || terminalStateSeen) {
-        return;
-      }
-
-      closeStream();
-      const source = new EventSource(apiUrl(`/matches/${selectedLiveMatchId}/live/stream`));
-      eventSource = source;
-
-      const handleLiveGameEvent = (event: MessageEvent<string>) => {
-        try {
-          const state = JSON.parse(event.data) as LiveGameState;
-          if (cancelled) {
-            return;
-          }
-
-          setRawLiveGame(state);
-          if (isTerminalLiveStatus(state.status)) {
-            terminalStateSeen = true;
-            closeStream();
-          }
-        } catch {
-          // Ignore malformed events and wait for the next update or fallback snapshot.
-        }
-      };
-
-      source.addEventListener("live_game", handleLiveGameEvent);
-      source.onerror = () => {
-        closeStream();
-        void loadLiveSnapshot();
-        scheduleReconnect();
-      };
-    };
-
-    void loadLiveSnapshot();
-    connectStream();
-    schedulePoll();
-
-    return () => {
-      cancelled = true;
-      closeStream();
-      if (reconnectTimer !== null) {
-        window.clearTimeout(reconnectTimer);
-      }
-      if (pollTimer !== null) {
-        window.clearTimeout(pollTimer);
-      }
-    };
-  }, [selectedLiveMatchId]);
-
-  useEffect(() => {
-    if (route.page !== "watch" || !route.matchId || rawLiveGame || selectedLiveMatch?.status !== "running") {
-      return;
-    }
-
-    let cancelled = false;
-
-    const pollUntilLive = async () => {
-      while (!cancelled) {
-        try {
-          const state = await fetchJson<LiveGameState>(`/matches/${route.matchId}/live`);
-          if (!cancelled) {
-            setRawLiveGame(state);
-          }
-          return;
-        } catch {
-          await new Promise<void>((resolve) => {
-            window.setTimeout(resolve, 300);
-          });
-        }
-      }
-    };
-
-    void pollUntilLive();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [route, rawLiveGame, selectedLiveMatch?.status]);
 
   useEffect(() => {
     if (!rawLiveGame || rawLiveGame.status !== "running") {
@@ -714,9 +615,10 @@ export default function App() {
     setIsSubmittingHumanMove(true);
     setError("");
     try {
+      const intentId = crypto.randomUUID();
       await fetchJson(`/human-games/${rawLiveGame.match_id}/move`, {
         method: "POST",
-        body: JSON.stringify({ uci })
+        body: JSON.stringify({ intent_id: intentId, uci })
       });
       setSelectedBoardSquare("");
     } catch (moveError) {

@@ -5,6 +5,7 @@ mod registry_sync;
 mod registry_simple_toml;
 mod db;
 mod gameplay;
+mod live;
 mod orchestration;
 mod presentation;
 mod rating;
@@ -22,7 +23,8 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tower::ServiceBuilder;
 use tower_http::{cors::CorsLayer, services::ServeDir};
 use tracing::{error, info};
-use state::{AppState, HumanGameStore, LiveGameStore, TournamentCoordinator};
+use live::LiveMatchStore;
+use state::{AppState, HumanGameStore, TournamentCoordinator};
 
 #[derive(Debug, thiserror::Error)]
 enum ApiError {
@@ -85,7 +87,7 @@ pub async fn run_server(
     let state = AppState {
         db,
         coordinator: TournamentCoordinator::default(),
-        live_games: LiveGameStore::default(),
+        live_matches: LiveMatchStore::default(),
         human_games: HumanGameStore::default(),
         frontend_dist: frontend_dist.clone(),
         setup_registry,
@@ -176,7 +178,7 @@ mod tests {
         build_app(AppState {
             db,
             coordinator: TournamentCoordinator::default(),
-            live_games: LiveGameStore::default(),
+            live_matches: LiveMatchStore::default(),
             human_games: HumanGameStore::default(),
             frontend_dist: None,
             setup_registry,
@@ -321,7 +323,7 @@ mod tests {
         let _app = build_app(AppState {
             db,
             coordinator: TournamentCoordinator::default(),
-            live_games: LiveGameStore::default(),
+            live_matches: LiveMatchStore::default(),
             human_games: HumanGameStore::default(),
             frontend_dist: Some(frontend_dist),
             setup_registry,
@@ -330,21 +332,35 @@ mod tests {
 
     #[tokio::test]
     async fn live_game_store_subscribe_receives_current_and_next_state() {
-        let store = LiveGameStore::default();
+        let store = LiveMatchStore::default();
         let running_state = sample_live_state(MatchStatus::Running);
         let match_id = running_state.match_id;
-        store.upsert(running_state.clone()).await;
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        init_db(&db).await.unwrap();
+        store
+            .record_legacy_state(&db, &running_state)
+            .await
+            .unwrap();
 
         let (initial, mut receiver) = store.subscribe(match_id).await.unwrap();
-        assert_eq!(initial, running_state);
+        assert_eq!(initial.match_id, running_state.match_id);
 
         let mut completed_state = running_state.clone();
         completed_state.status = MatchStatus::Completed;
         completed_state.updated_at = Utc::now();
-        store.upsert(completed_state.clone()).await;
+        store.record_legacy_state(&db, &completed_state).await.unwrap();
 
         let streamed = receiver.recv().await.unwrap();
-        assert_eq!(streamed, completed_state);
+        match streamed {
+            arena_core::LiveEventEnvelope::GameFinished(value) => {
+                assert_eq!(value.match_id, completed_state.match_id);
+            }
+            _ => panic!("expected terminal event"),
+        }
     }
 
     #[tokio::test]

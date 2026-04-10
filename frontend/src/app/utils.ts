@@ -90,7 +90,7 @@ export function formatDuration(ms: number) {
 }
 
 export function isTerminalLiveStatus(status: string) {
-  return status === "completed" || status === "failed" || status === "skipped";
+  return status === "completed" || status === "failed" || status === "skipped" || status === "finished" || status === "aborted";
 }
 
 export function formatTimeControl(timeControl: TimeControl) {

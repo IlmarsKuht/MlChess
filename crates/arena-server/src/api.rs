@@ -3,6 +3,7 @@ use std::convert::Infallible;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
+    http::HeaderMap,
     response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
 };
@@ -19,9 +20,8 @@ use crate::{
         resolve_preset_participants, submit_human_move,
     },
     presentation::{
-        ApiGameRecord, ApiLeaderboardEntry, ApiLiveGameState, ApiMatchSeries, HumanPlayerProfile,
-        ReplayPayload, api_game_record, api_leaderboard_entry, api_live_game_state,
-        api_match_series, is_terminal_live_status, live_game_event, version_name_by_id,
+        ApiGameRecord, ApiLeaderboardEntry, ApiMatchSeries, HumanPlayerProfile, ReplayPayload,
+        api_game_record, api_leaderboard_entry, api_match_series, version_name_by_id,
     },
     registry::sync_setup_registry_if_changed,
     state::AppState,
@@ -31,10 +31,10 @@ use crate::{
         get_tournament, list_agent_versions, list_agents, list_event_presets, list_games,
         list_match_series, list_opening_suites, list_pools, list_tournaments,
         load_aggregate_leaderboard, load_pool_leaderboard, load_rating_history,
-        update_match_series_status, update_tournament_status,
+        update_tournament_status,
     },
 };
-use arena_core::{GameResult, GameTermination, LiveGameFrame, LiveGameState, LiveSide, MatchStatus};
+use arena_core::{LiveEventEnvelope, LiveMatchSnapshot};
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
@@ -98,6 +98,7 @@ struct CreateHumanGameRequest {
 
 #[derive(Debug, Deserialize)]
 struct SubmitHumanMoveRequest {
+    intent_id: Option<Uuid>,
     uci: String,
 }
 
@@ -321,8 +322,9 @@ async fn submit_human_move_handler(
     Path(id): Path<Uuid>,
     Json(payload): Json<SubmitHumanMoveRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    submit_human_move(state, id, payload.uci).await?;
-    Ok(Json(json!({ "accepted": true, "match_id": id })))
+    let intent_id = payload.intent_id.unwrap_or_else(Uuid::new_v4);
+    let ack = submit_human_move(state, id, intent_id, payload.uci).await?;
+    Ok(Json(json!({ "intent_id": intent_id, "ack": ack })))
 }
 
 async fn get_human_player_handler(
@@ -354,7 +356,6 @@ async fn list_matches_handler(
     State(state): State<AppState>,
     Query(query): Query<MatchesQuery>,
 ) -> Result<Json<Vec<ApiMatchSeries>>, ApiError> {
-    reconcile_running_matches(&state, query.tournament_id).await?;
     let versions = list_agent_versions(&state.db, None).await?;
     let version_name_by_id = version_name_by_id(&versions);
     let human_player = ensure_human_player(&state.db).await?;
@@ -376,171 +377,75 @@ async fn list_matches_handler(
     Ok(Json(matches))
 }
 
+fn protocol_event(event: &LiveEventEnvelope) -> Event {
+    let (event_type, seq) = match event {
+        LiveEventEnvelope::Snapshot(value) => ("snapshot", value.seq),
+        LiveEventEnvelope::MoveCommitted(value) => ("move_committed", value.seq),
+        LiveEventEnvelope::ClockSync(value) => ("clock_sync", value.seq),
+        LiveEventEnvelope::GameFinished(value) => ("game_finished", value.seq),
+    };
+    Event::default()
+        .event(event_type)
+        .id(seq.to_string())
+        .json_data(event)
+        .expect("protocol event should serialize")
+}
+
 async fn get_live_match_handler(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-) -> Result<Json<ApiLiveGameState>, ApiError> {
-    reconcile_single_running_match(&state, id).await?;
-    let live_state = state
-        .live_games
-        .get(id)
+) -> Result<Json<LiveMatchSnapshot>, ApiError> {
+    state.live_matches.bootstrap_from_db(&state.db, id).await?;
+    let snapshot = state
+        .live_matches
+        .get_snapshot(id)
         .await
         .ok_or_else(|| ApiError::NotFound(format!("live state for match {id} not found")))?;
-    let versions = list_agent_versions(&state.db, None).await?;
-    let version_name_by_id = version_name_by_id(&versions);
-    let human_player = ensure_human_player(&state.db).await?;
-    let interactive = state.human_games.get(id).await.is_some();
-    Ok(Json(api_live_game_state(
-        &live_state,
-        &version_name_by_id,
-        &human_player,
-        interactive,
-    )))
+    Ok(Json(snapshot))
 }
 
 async fn stream_live_match_handler(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
 ) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    reconcile_single_running_match(&state, id).await?;
-    let (initial_state, receiver) = state
-        .live_games
+    state.live_matches.bootstrap_from_db(&state.db, id).await?;
+    let (initial_snapshot, receiver) = state
+        .live_matches
         .subscribe(id)
         .await
         .ok_or_else(|| ApiError::NotFound(format!("live state for match {id} not found")))?;
+    let last_seq = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+    let replay = if let Some(seq) = last_seq {
+        state.live_matches.replay_since(id, seq).await.unwrap_or_default()
+    } else {
+        Vec::new()
+    };
 
-    let versions = list_agent_versions(&state.db, None).await?;
-    let version_name_by_id = version_name_by_id(&versions);
-    let human_player = ensure_human_player(&state.db).await?;
-    let interactive = state.human_games.get(id).await.is_some();
-    let initial_terminal = is_terminal_live_status(initial_state.status);
-    let initial_payload =
-        api_live_game_state(&initial_state, &version_name_by_id, &human_player, interactive);
-    let initial_stream =
-        stream::once(async move { Ok::<Event, Infallible>(live_game_event(&initial_payload)) });
-    let updates = stream::unfold(
-        (
-            receiver,
-            initial_terminal,
-            version_name_by_id,
-            human_player,
-            interactive,
-        ),
-        |(mut receiver, finished, version_name_by_id, human_player, interactive)| async move {
-            if finished {
-                return None;
-            }
-
-            loop {
-                match receiver.recv().await {
-                    Ok(state) => {
-                        let terminal = is_terminal_live_status(state.status);
-                        let payload = api_live_game_state(
-                            &state,
-                            &version_name_by_id,
-                            &human_player,
-                            interactive,
-                        );
-                        let event = live_game_event(&payload);
-                        return Some((
-                            Ok(event),
-                            (
-                                receiver,
-                                terminal,
-                                version_name_by_id,
-                                human_player,
-                                interactive,
-                            ),
-                        ));
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
-                }
-            }
-        },
+    let initial_events = if replay.is_empty() {
+        vec![LiveEventEnvelope::Snapshot(initial_snapshot)]
+    } else {
+        replay
+    };
+    let initial_stream = stream::iter(
+        initial_events
+            .into_iter()
+            .map(|event| Ok::<Event, Infallible>(protocol_event(&event))),
     );
-
-    Ok(Sse::new(initial_stream.chain(updates)).keep_alive(KeepAlive::default()))
-}
-
-async fn reconcile_running_matches(
-    state: &AppState,
-    tournament_id: Option<Uuid>,
-) -> Result<(), ApiError> {
-    let matches = list_match_series(&state.db, tournament_id).await?;
-    for series in matches {
-        if series.status == MatchStatus::Running {
-            reconcile_single_running_match(state, series.id).await?;
+    let updates = stream::unfold(receiver, |mut receiver| async move {
+        loop {
+            match receiver.recv().await {
+                Ok(event) => return Some((Ok(protocol_event(&event)), receiver)),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+            }
         }
-    }
-    Ok(())
-}
+    });
 
-async fn reconcile_single_running_match(state: &AppState, match_id: Uuid) -> Result<(), ApiError> {
-    let Some(live_state) = state.live_games.get(match_id).await else {
-        return Ok(());
-    };
-
-    let Some(next_state) = stale_timeout_live_state(&live_state) else {
-        return Ok(());
-    };
-
-    state.live_games.upsert(next_state).await;
-    update_match_series_status(&state.db, match_id, MatchStatus::Completed).await?;
-    Ok(())
-}
-
-fn stale_timeout_live_state(live_state: &LiveGameState) -> Option<LiveGameState> {
-    if live_state.status != MatchStatus::Running {
-        return None;
-    }
-
-    let frame = live_state.live_frames.last()?;
-    let elapsed_ms = (Utc::now() - frame.updated_at).num_milliseconds().max(0) as u64;
-    let remaining_ms = match frame.side_to_move {
-        LiveSide::White => frame.white_time_left_ms,
-        LiveSide::Black => frame.black_time_left_ms,
-    };
-    let grace_ms = 3_000;
-    if elapsed_ms <= remaining_ms.saturating_add(grace_ms) {
-        return None;
-    }
-
-    let (result, white_time_left_ms, black_time_left_ms) = match frame.side_to_move {
-        LiveSide::White => (GameResult::BlackWin, 0, frame.black_time_left_ms),
-        LiveSide::Black => (GameResult::WhiteWin, frame.white_time_left_ms, 0),
-    };
-    let updated_at = Utc::now();
-
-    Some(LiveGameState {
-        match_id: live_state.match_id,
-        tournament_id: live_state.tournament_id,
-        pool_id: live_state.pool_id,
-        variant: live_state.variant,
-        white_version_id: live_state.white_version_id,
-        black_version_id: live_state.black_version_id,
-        start_fen: live_state.start_fen.clone(),
-        current_fen: live_state.current_fen.clone(),
-        moves_uci: live_state.moves_uci.clone(),
-        white_time_left_ms,
-        black_time_left_ms,
-        status: MatchStatus::Completed,
-        result: Some(result),
-        termination: Some(GameTermination::Timeout),
-        updated_at,
-        live_frames: vec![LiveGameFrame {
-            ply: live_state.moves_uci.len() as u32,
-            fen: live_state.current_fen.clone(),
-            move_uci: live_state.moves_uci.last().cloned(),
-            white_time_left_ms,
-            black_time_left_ms,
-            updated_at,
-            side_to_move: frame.side_to_move.clone(),
-            status: MatchStatus::Completed,
-            result: Some(result),
-            termination: Some(GameTermination::Timeout),
-        }],
-    })
+    Ok(Sse::new(initial_stream.chain(updates)).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(12)).text("heartbeat")))
 }
 
 async fn list_games_handler(

@@ -176,6 +176,28 @@ pub(crate) async fn init_db(db: &SqlitePool) -> Result<()> {
             created_at TEXT NOT NULL,
             FOREIGN KEY(pool_id) REFERENCES benchmark_pools(id) ON DELETE CASCADE
         )",
+        "CREATE TABLE IF NOT EXISTS live_runtime_checkpoints (
+            match_id TEXT PRIMARY KEY,
+            seq INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            result TEXT NOT NULL,
+            termination TEXT NOT NULL,
+            fen TEXT NOT NULL,
+            moves TEXT NOT NULL,
+            white_remaining_ms INTEGER NOT NULL,
+            black_remaining_ms INTEGER NOT NULL,
+            side_to_move TEXT NOT NULL,
+            turn_started_server_unix_ms INTEGER NOT NULL,
+            updated_at TEXT NOT NULL
+        )",
+        "CREATE TABLE IF NOT EXISTS live_runtime_events (
+            match_id TEXT NOT NULL,
+            seq INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(match_id, seq)
+        )",
     ] {
         sqlx::query(statement).execute(db).await?;
     }

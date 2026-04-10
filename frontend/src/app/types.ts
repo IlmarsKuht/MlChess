@@ -10,6 +10,9 @@ export type WorkspaceView =
   | "replay";
 export type GameResult = "white_win" | "black_win" | "draw";
 export type LiveSide = "white" | "black";
+export type ProtocolLiveSide = "white" | "black" | "none";
+export type LiveStatus = "running" | "finished" | "aborted";
+export type LiveResult = "white_win" | "black_win" | "draw" | "none";
 export type GameTermination =
   | "checkmate"
   | "stalemate"
@@ -18,10 +21,12 @@ export type GameTermination =
   | "insufficient_material"
   | "timeout"
   | "resignation"
+  | "abort"
   | "illegal_move"
   | "move_limit"
   | "engine_failure"
-  | "unknown";
+  | "unknown"
+  | "none";
 export type RouteState =
   | { page: "app"; view: WorkspaceView }
   | { page: "engine"; engineId: string }
@@ -160,41 +165,70 @@ export interface ReplayPayload {
   termination: GameTermination;
 }
 
-export interface LiveGameState {
+export interface LiveMatchSnapshot {
   match_id: string;
-  tournament_id: string;
-  pool_id: string;
-  variant: Variant;
-  white_version_id: string;
-  black_version_id: string;
-  start_fen: string;
-  current_fen: string;
-  moves_uci: string[];
+  protocol_version: number;
+  event_type: "snapshot";
+  seq: number;
+  server_now_unix_ms: number;
+  status: LiveStatus;
+  result: LiveResult;
+  termination: GameTermination;
+  fen: string;
+  moves: string[];
   white_time_left_ms: number;
   black_time_left_ms: number;
-  status: string;
-  result?: GameResult | null;
-  termination?: GameTermination | null;
-  updated_at: string;
-  live_frames: LiveGameFrame[];
-  white_participant: Participant;
-  black_participant: Participant;
-  interactive: boolean;
-  human_turn: boolean;
+  side_to_move: ProtocolLiveSide;
+  turn_started_server_unix_ms: number;
 }
 
-export interface LiveGameFrame {
-  ply: number;
+export interface MoveCommittedEvent {
+  protocol_version: number;
+  event_type: "move_committed";
+  match_id: string;
+  seq: number;
+  server_now_unix_ms: number;
+  status: LiveStatus;
+  move_uci: string;
   fen: string;
-  move_uci?: string | null;
+  moves: string[];
   white_time_left_ms: number;
   black_time_left_ms: number;
-  updated_at: string;
-  side_to_move: LiveSide;
-  status: string;
-  result?: GameResult | null;
-  termination?: GameTermination | null;
+  side_to_move: ProtocolLiveSide;
+  turn_started_server_unix_ms: number;
 }
+
+export interface ClockSyncEvent {
+  protocol_version: number;
+  event_type: "clock_sync";
+  match_id: string;
+  seq: number;
+  server_now_unix_ms: number;
+  status: LiveStatus;
+  white_time_left_ms: number;
+  black_time_left_ms: number;
+  side_to_move: ProtocolLiveSide;
+  turn_started_server_unix_ms: number;
+}
+
+export interface GameFinishedEvent {
+  protocol_version: number;
+  event_type: "game_finished";
+  match_id: string;
+  seq: number;
+  server_now_unix_ms: number;
+  status: LiveStatus;
+  result: LiveResult;
+  termination: GameTermination;
+  fen: string;
+  moves: string[];
+  white_time_left_ms: number;
+  black_time_left_ms: number;
+  side_to_move: ProtocolLiveSide;
+  turn_started_server_unix_ms: number;
+}
+
+export type LiveProtocolEvent = LiveMatchSnapshot | MoveCommittedEvent | ClockSyncEvent | GameFinishedEvent;
 
 export interface HumanPlayerProfile {
   id: string;
