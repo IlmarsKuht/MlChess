@@ -81,7 +81,8 @@ impl UciSession {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
         if let Some(cwd) = &version.working_directory {
             command.current_dir(PathBuf::from(cwd));
         }

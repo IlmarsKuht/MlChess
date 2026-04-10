@@ -21,6 +21,7 @@ pub(crate) struct AgentRegistration {
     pub(crate) name: String,
     pub(crate) tags: Vec<String>,
     pub(crate) notes: Option<String>,
+    pub(crate) documentation: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +37,7 @@ pub(crate) struct AgentVersionRegistration {
     pub(crate) declared_name: Option<String>,
     pub(crate) tags: Vec<String>,
     pub(crate) notes: Option<String>,
+    pub(crate) documentation: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,6 +96,7 @@ struct EngineManifest {
     declared_name: Option<String>,
     tags: Vec<String>,
     notes: Option<String>,
+    documentation: Option<String>,
     supports_chess960: bool,
     executable_path: String,
     working_directory: Option<String>,
@@ -131,6 +134,8 @@ struct CargoArenaMetadata {
     #[serde(default)]
     tags: Vec<String>,
     notes: Option<String>,
+    documentation: Option<String>,
+    documentation_file: Option<String>,
     supports_chess960: Option<bool>,
 }
 
@@ -220,19 +225,9 @@ pub(crate) fn load_registry_snapshot(workspace_root: &Path) -> Result<RegistrySn
     })
 }
 
-pub(crate) fn cargo_run_args(package_name: &str) -> Vec<String> {
-    vec![
-        "run".to_string(),
-        "--quiet".to_string(),
-        "-p".to_string(),
-        package_name.to_string(),
-    ]
-}
-
 fn load_rust_engines(workspace_root: &Path) -> Result<Vec<EngineManifest>> {
     let metadata = cargo_metadata(workspace_root)?;
     let engines_root = workspace_root.join("engines");
-    let cargo_binary = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let workspace_dir = workspace_root.to_string_lossy().into_owned();
     let mut engines = Vec::new();
 
@@ -293,10 +288,15 @@ fn load_rust_engines(workspace_root: &Path) -> Result<Vec<EngineManifest>> {
             declared_name: arena.declared_name,
             tags: normalize_tags(arena.tags),
             notes: normalize_optional_string(arena.notes),
+            documentation: resolve_documentation(
+                package_dir,
+                normalize_optional_string(arena.documentation),
+                normalize_optional_string(arena.documentation_file),
+            )?,
             supports_chess960: arena.supports_chess960.unwrap_or(true),
-            executable_path: cargo_binary.clone(),
+            executable_path: rust_engine_binary_path(workspace_root, &package.name),
             working_directory: Some(workspace_dir.clone()),
-            args: cargo_run_args(&package.name),
+            args: Vec::new(),
             env: BTreeMap::new(),
         });
     }
@@ -307,6 +307,39 @@ fn load_rust_engines(workspace_root: &Path) -> Result<Vec<EngineManifest>> {
             .then(left.version_key.cmp(&right.version_key))
     });
     Ok(engines)
+}
+
+fn rust_engine_binary_path(workspace_root: &Path, package_name: &str) -> String {
+    let binary_name = if cfg!(windows) {
+        format!("{package_name}.exe")
+    } else {
+        package_name.to_string()
+    };
+
+    let candidate_from_current_exe = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.join(&binary_name)));
+
+    if let Some(candidate) = candidate_from_current_exe
+        .filter(|path| path.exists())
+    {
+        return candidate.to_string_lossy().into_owned();
+    }
+
+    workspace_root
+        .join("target")
+        .join(default_rust_binary_profile())
+        .join(binary_name)
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn default_rust_binary_profile() -> &'static str {
+    if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    }
 }
 
 fn load_command_engines(workspace_root: &Path) -> Result<Vec<EngineManifest>> {
@@ -336,6 +369,9 @@ fn load_command_engines(workspace_root: &Path) -> Result<Vec<EngineManifest>> {
             None => None,
         };
 
+        let manifest_dir = path
+            .parent()
+            .context("engine manifest should have a parent directory")?;
         engines.push(EngineManifest {
             agent_key: document.require_string("agent_key")?,
             version_key: document.require_string("version_key")?,
@@ -344,6 +380,11 @@ fn load_command_engines(workspace_root: &Path) -> Result<Vec<EngineManifest>> {
             declared_name: normalize_optional_string(document.optional_string("declared_name")?),
             tags: normalize_tags(document.optional_string_array("tags")?),
             notes: normalize_optional_string(document.optional_string("notes")?),
+            documentation: resolve_documentation(
+                manifest_dir,
+                normalize_optional_string(document.optional_string("documentation")?),
+                normalize_optional_string(document.optional_string("documentation_file")?),
+            )?,
             supports_chess960: document.optional_bool("supports_chess960")?.unwrap_or(true),
             executable_path,
             working_directory,
@@ -380,6 +421,9 @@ fn split_engine_registrations(
                 if existing.notes.is_none() {
                     existing.notes = manifest.notes.clone();
                 }
+                if existing.documentation.is_none() {
+                    existing.documentation = manifest.documentation.clone();
+                }
             }
             None => {
                 agents_by_key.insert(
@@ -389,6 +433,7 @@ fn split_engine_registrations(
                         name: manifest.agent_name.clone(),
                         tags: manifest.tags.clone(),
                         notes: manifest.notes.clone(),
+                        documentation: manifest.documentation.clone(),
                     },
                 );
             }
@@ -408,6 +453,7 @@ fn split_engine_registrations(
             declared_name: manifest.declared_name,
             tags: manifest.tags,
             notes: manifest.notes,
+            documentation: manifest.documentation,
         });
     }
 
@@ -586,6 +632,30 @@ fn normalize_optional_string(value: Option<String>) -> Option<String> {
     })
 }
 
+fn resolve_documentation(
+    base_dir: &Path,
+    inline: Option<String>,
+    file: Option<String>,
+) -> Result<Option<String>> {
+    match (inline, file) {
+        (Some(_), Some(file)) => {
+            bail!("documentation and documentation_file cannot both be set (got {file})")
+        }
+        (Some(inline), None) => Ok(Some(inline)),
+        (None, Some(file)) => {
+            let path = resolve_relative_to(base_dir, &file)?;
+            Ok(Some(
+                fs::read_to_string(&path)
+                    .with_context(|| format!("failed to read documentation file {}", path.display()))?
+                    .trim()
+                    .to_string(),
+            )
+            .filter(|text| !text.is_empty()))
+        }
+        (None, None) => Ok(None),
+    }
+}
+
 fn cargo_metadata(workspace_root: &Path) -> Result<CargoMetadata> {
     let cargo_binary = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let output = Command::new(cargo_binary)
@@ -622,7 +692,11 @@ fn normalize_command(workspace_root: &Path, value: &str) -> Result<String> {
 }
 
 fn resolve_workspace_relative(workspace_root: &Path, value: &str) -> Result<PathBuf> {
-    let mut path = PathBuf::from(workspace_root);
+    resolve_relative_to(workspace_root, value)
+}
+
+fn resolve_relative_to(base: &Path, value: &str) -> Result<PathBuf> {
+    let mut path = PathBuf::from(base);
     for component in Path::new(value).components() {
         match component {
             Component::CurDir => {}

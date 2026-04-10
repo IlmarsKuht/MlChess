@@ -113,6 +113,7 @@ pub struct Agent {
     pub protocol: AgentProtocol,
     pub tags: Vec<String>,
     pub notes: Option<String>,
+    pub documentation: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -131,6 +132,7 @@ pub struct AgentVersion {
     pub declared_name: Option<String>,
     pub tags: Vec<String>,
     pub notes: Option<String>,
+    pub documentation: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 

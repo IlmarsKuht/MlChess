@@ -469,6 +469,18 @@ textarea {
   gap: 0.75rem;
 }
 
+.engine-directory {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.8fr) minmax(0, 1.2fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+.engine-directory-list {
+  max-height: 720px;
+  overflow: auto;
+}
+
 .table-row,
 .leader-row,
 .info-row {
@@ -766,6 +778,75 @@ textarea {
   background: rgba(248, 250, 251, 0.88);
   display: grid;
   gap: 0.2rem;
+}
+
+.engine-detail {
+  padding: 1rem;
+  border-radius: 24px;
+  border: 1px solid rgba(19, 32, 50, 0.08);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.97), rgba(244, 247, 248, 0.94));
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.workspace > .engine-page {
+  grid-column: 1 / -1;
+}
+
+.engine-detail-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: flex-start;
+}
+
+.engine-detail-header h3 {
+  margin: 0.3rem 0 0;
+  font-size: 1.45rem;
+}
+
+.engine-detail-header p {
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+}
+
+.engine-doc {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.engine-doc-heading,
+.engine-doc-subheading {
+  margin: 0;
+  color: var(--accent-deep);
+}
+
+.engine-doc-heading {
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--line);
+  font-size: 1rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.engine-doc-subheading {
+  font-size: 1rem;
+}
+
+.engine-doc-paragraph,
+.engine-doc-list {
+  margin: 0;
+  color: var(--ink);
+  line-height: 1.7;
+}
+
+.engine-doc-list {
+  padding-left: 1.2rem;
+}
+
+.engine-doc-list li + li {
+  margin-top: 0.45rem;
 }
 
 .replay-textarea {
@@ -1113,6 +1194,7 @@ textarea {
   .hero,
   .view-switcher,
   .summary-grid,
+  .engine-directory,
   .replay-content,
   .watch-stage,
   .watch-stats-grid {
@@ -1169,6 +1251,7 @@ textarea {
 
   .watch-header,
   .watch-meta-bar,
+  .engine-detail-header,
   .resume-banner,
   .match-card-header,
   .match-card-sides {

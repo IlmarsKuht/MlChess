@@ -16,7 +16,7 @@ use arena_core::{
 };
 use arena_runner::{
     MatchPairRequest, MatchRequest, build_adapter, calculate_move_budget, classify_position,
-    classify_terminal_board, pgn_from_moves, play_match_pair,
+    classify_terminal_board, pgn_from_moves, play_match_pair, starting_board,
 };
 use chrono::Utc;
 use sqlx::SqlitePool;
@@ -689,6 +689,16 @@ async fn play_engine_match_pair(
         created_at: Utc::now(),
     };
     insert_match_series(&state.db, &first_series).await?;
+    state
+        .live_games
+        .upsert(build_pending_live_state(
+            tournament_id,
+            pool,
+            &first_series,
+            opening.as_ref(),
+            pair_index,
+        ))
+        .await;
 
     let second_series = if swap_colors {
         let series = MatchSeries {
@@ -700,7 +710,7 @@ async fn play_engine_match_pair(
             black_version_id: engine_a.id,
             opening_id: opening.as_ref().map(|value| value.id),
             game_index: pair_index.saturating_mul(2).saturating_add(1),
-            status: MatchStatus::Running,
+            status: MatchStatus::Pending,
             created_at: Utc::now(),
         };
         insert_match_series(&state.db, &series).await?;
@@ -711,9 +721,17 @@ async fn play_engine_match_pair(
 
     let progress_sink = Arc::new({
         let live_games = state.live_games.clone();
-        move |live_state| {
+        let db = state.db.clone();
+        move |live_state: LiveGameState| {
             let live_games = live_games.clone();
+            let db = db.clone();
             tokio::spawn(async move {
+                let status = if matches!(live_state.status, MatchStatus::Completed) {
+                    MatchStatus::Completed
+                } else {
+                    MatchStatus::Running
+                };
+                let _ = update_match_series_status(&db, live_state.match_id, status).await;
                 live_games.upsert(live_state).await;
             });
         }
@@ -776,5 +794,55 @@ async fn play_engine_match_pair(
             }
             Err(err)
         }
+    }
+}
+
+fn build_pending_live_state(
+    tournament_id: Uuid,
+    pool: &arena_core::BenchmarkPool,
+    series: &MatchSeries,
+    opening: Option<&arena_core::OpeningPosition>,
+    pair_index: u32,
+) -> LiveGameState {
+    let board = starting_board(
+        pool.variant,
+        opening,
+        pool.fairness.opening_seed.or(Some(pair_index as u64)),
+    );
+    let fen = board.to_string();
+    let updated_at = Utc::now();
+
+    LiveGameState {
+        match_id: series.id,
+        tournament_id,
+        pool_id: pool.id,
+        variant: pool.variant,
+        white_version_id: series.white_version_id,
+        black_version_id: series.black_version_id,
+        start_fen: fen.clone(),
+        current_fen: fen.clone(),
+        moves_uci: Vec::new(),
+        white_time_left_ms: pool.time_control.initial_ms,
+        black_time_left_ms: pool.time_control.initial_ms,
+        status: MatchStatus::Running,
+        result: None,
+        termination: None,
+        updated_at,
+        live_frames: vec![LiveGameFrame {
+            ply: 0,
+            fen,
+            move_uci: None,
+            white_time_left_ms: pool.time_control.initial_ms,
+            black_time_left_ms: pool.time_control.initial_ms,
+            updated_at,
+            side_to_move: if board.side_to_move() == cozy_chess::Color::Black {
+                LiveSide::Black
+            } else {
+                LiveSide::White
+            },
+            status: MatchStatus::Running,
+            result: None,
+            termination: None,
+        }],
     }
 }

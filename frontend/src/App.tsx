@@ -4,6 +4,7 @@ import { apiUrl, fetchJson } from "./app/api";
 import {
   BoardView,
   EmptyState,
+  EngineDocumentation,
   EngineSideCard,
   Field,
   MetricCard,
@@ -44,6 +45,7 @@ import {
   liveRevealDelayMs,
   loadErrorMessage,
   maybePromotion,
+  engineHash,
   navigateToHash,
   orientSquares,
   parseRoute,
@@ -102,7 +104,7 @@ export default function App() {
   });
 
   const route = parseRoute(locationHash);
-  const activeView = route.page === "app" ? route.view : "live_duel";
+  const activeView = route.page === "app" ? route.view : route.page === "engine" ? "setup" : "live_duel";
   const agentNameById = Object.fromEntries(agents.map((agent) => [agent.id, agent.name]));
   const poolNameById = Object.fromEntries(pools.map((pool) => [pool.id, pool.name]));
   const versionNameById = Object.fromEntries(
@@ -114,7 +116,7 @@ export default function App() {
   const standardPools = pools.filter((pool) => pool.variant === "standard");
   const tournamentById = Object.fromEntries(tournaments.map((tournament) => [tournament.id, tournament]));
   const gameByMatchId = Object.fromEntries(games.map((game) => [game.match_id, game]));
-  const starterVersions = versions.filter((version) => version.tags.includes("starter"));
+  const documentedVersions = versions.filter((version) => Boolean(version.documentation?.trim()));
   const recentGames = games.slice(0, 6);
   const runningTournaments = tournaments.filter((tournament) => tournament.status === "running");
   const runningMatches = matches.filter((match) => match.status === "running");
@@ -154,6 +156,8 @@ export default function App() {
   const visibleLiveTermination = visibleLiveFrame?.termination ?? null;
   const liveSideToMove = visibleLiveFrame?.side_to_move ?? "white";
   const selectedLiveMatch = matches.find((match) => match.id === selectedLiveMatchId) ?? null;
+  const selectedEngineVersion =
+    route.page === "engine" ? versions.find((version) => version.id === route.engineId) ?? null : null;
   const liveWhiteParticipant = rawLiveGame?.white_participant ?? selectedLiveMatch?.white_participant ?? null;
   const liveBlackParticipant = rawLiveGame?.black_participant ?? selectedLiveMatch?.black_participant ?? null;
   const interactiveLive = rawLiveGame?.interactive ?? selectedLiveMatch?.interactive ?? false;
@@ -192,6 +196,10 @@ export default function App() {
   function navigateToWatch(matchId: string) {
     setSelectedLiveMatchId(matchId);
     navigateToHash(watchHash(matchId));
+  }
+
+  function navigateToEngine(engineId: string) {
+    navigateToHash(engineHash(engineId));
   }
 
   async function refreshArena(options: { silent?: boolean } = {}) {
@@ -355,6 +363,7 @@ export default function App() {
     let reconnectTimer: number | null = null;
     let eventSource: EventSource | null = null;
     let terminalStateSeen = false;
+    let pollTimer: number | null = null;
 
     const closeStream = () => {
       if (eventSource) {
@@ -377,6 +386,19 @@ export default function App() {
           setRawLiveGame(null);
         }
       }
+    };
+
+    const schedulePoll = () => {
+      if (cancelled || terminalStateSeen || pollTimer !== null) {
+        return;
+      }
+
+      pollTimer = window.setTimeout(() => {
+        pollTimer = null;
+        void loadLiveSnapshot().finally(() => {
+          schedulePoll();
+        });
+      }, 2000);
     };
 
     const scheduleReconnect = () => {
@@ -426,12 +448,16 @@ export default function App() {
 
     void loadLiveSnapshot();
     connectStream();
+    schedulePoll();
 
     return () => {
       cancelled = true;
       closeStream();
       if (reconnectTimer !== null) {
         window.clearTimeout(reconnectTimer);
+      }
+      if (pollTimer !== null) {
+        window.clearTimeout(pollTimer);
       }
     };
   }, [selectedLiveMatchId]);
@@ -935,8 +961,8 @@ export default function App() {
                 ? `${runningTournaments.length} event${runningTournaments.length === 1 ? "" : "s"} live`
                 : "Arena idle"}
             </StatusBadge>
-            <StatusBadge tone={starterVersions.length >= 2 ? "good" : "warning"}>
-              {starterVersions.length >= 2 ? "Starter engines ready" : "Starter engines missing"}
+            <StatusBadge tone={documentedVersions.length > 0 ? "good" : "warning"}>
+              {documentedVersions.length > 0 ? "Engine docs available" : "Engine docs missing"}
             </StatusBadge>
           </div>
         </div>
@@ -981,9 +1007,9 @@ export default function App() {
               </p>
               <div className="summary-grid">
                 <div className="summary-card">
-                  <span>Starter engines</span>
-                  <strong>{starterVersions.length}</strong>
-                  <p>{starterVersions.length >= 2 ? "Bundled lineup ready" : "Unavailable"}</p>
+                  <span>Documented engines</span>
+                  <strong>{documentedVersions.length}</strong>
+                  <p>{documentedVersions.length > 0 ? "Deep docs ready on engine pages" : "No detailed docs yet"}</p>
                 </div>
                 <div className="summary-card">
                   <span>Featured format</span>
@@ -1058,7 +1084,7 @@ export default function App() {
           </>
         )}
 
-        {activeView === "setup" && (
+        {route.page === "app" && activeView === "setup" && (
           <>
             <section className="panel">
               <div className="panel-header">
@@ -1089,16 +1115,22 @@ export default function App() {
               {versions.length === 0 ? (
                 <EmptyState>No engine versions are available right now.</EmptyState>
               ) : (
-                <div className="table">
+                <div className="table engine-directory-list">
                   {versions.map((version) => (
-                    <div className="table-row table-row-stack" key={version.id}>
+                    <button
+                      type="button"
+                      className="table-row table-row-stack replay-row"
+                      key={version.id}
+                      onClick={() => navigateToEngine(version.id)}
+                    >
                       <div>
                         <strong>{versionNameById[version.id]}</strong>
                         <p>{agentNameById[version.agent_id] ?? "Unknown agent"}</p>
                         {version.notes ? <p>{version.notes}</p> : null}
+                        <p>Open full engine page</p>
                       </div>
                       <div className="chip">{version.tags.join(" • ") || "Engine"}</div>
-                    </div>
+                    </button>
                   ))}
                 </div>
               )}
@@ -1546,6 +1578,45 @@ export default function App() {
                   </Field>
                 </div>
               </div>
+            )}
+          </section>
+        )}
+
+        {route.page === "engine" && (
+          <section className="panel engine-page">
+            <div className="panel-header">
+              <h2>Engine Page</h2>
+              <button type="button" className="button-ghost compact-button" onClick={() => navigateToView("setup")}>
+                Back to engines
+              </button>
+            </div>
+
+            {selectedEngineVersion ? (
+              <div className="engine-detail">
+                <div className="engine-detail-header">
+                  <div>
+                    <p className="eyebrow">Engine dossier</p>
+                    <h3>{versionNameById[selectedEngineVersion.id]}</h3>
+                    <p>{agentNameById[selectedEngineVersion.agent_id] ?? "Unknown agent"}</p>
+                  </div>
+                  <div className="chip">{selectedEngineVersion.tags.join(" • ") || "Engine"}</div>
+                </div>
+
+                {selectedEngineVersion.notes ? (
+                  <div className="result-strip">
+                    <strong>Summary</strong>
+                    <span>{selectedEngineVersion.notes}</span>
+                  </div>
+                ) : null}
+
+                {selectedEngineVersion.documentation ? (
+                  <EngineDocumentation text={selectedEngineVersion.documentation} />
+                ) : (
+                  <EmptyState>No long-form documentation is available for this engine yet.</EmptyState>
+                )}
+              </div>
+            ) : (
+              <EmptyState>This engine page could not be loaded.</EmptyState>
             )}
           </section>
         )}

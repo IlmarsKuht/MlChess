@@ -34,9 +34,9 @@ Vite proxies `/api` requests to the Rust server during development.
 
 ## Code-Managed Setup
 
-- `material-plus-v1` / `material-plus-dev`: frozen release plus mutable development line for the Material Plus family
-- `minimax-v1` / `minimax-dev`: frozen release plus mutable development line for the MiniMax family
-- `king-safety-v1` / `king-safety-dev`: frozen release plus mutable development line for the King Safety family
+- `handcrafted-alpha-beta/v1`: the current single classical baseline with iterative deepening, PVS alpha-beta, quiescence, a transposition table, and a tapered handcrafted evaluation
+- `auto-tuned-classical/v1`: the same classical search family, but with evaluation weights sourced from an auto-tuned parameter profile instead of being chosen manually
+- long-form engine documentation can live next to each engine in an `ENGINE.md` file and be referenced with `documentation_file = "ENGINE.md"` in the engine manifest so the UI can show a deep clickable dossier for that engine
 
 Rust engines live under `engines/*` and are discovered from `Cargo.toml` plus `[package.metadata.arena]`.
 Use a stable `agent_key` for an engine family and a unique `version_key` like `v1`, `v2`, or `dev`
@@ -45,7 +45,8 @@ Command or ML engines can be added with `engines/<slug>/arena-engine.toml`. Keep
 placeholder `Cargo.toml` in that folder as well so the workspace glob remains valid.
 
 ```powershell
-cargo build -p material-plus-v1 -p material-plus-dev -p minimax-v1 -p minimax-dev -p king-safety-v1 -p king-safety-dev
+cargo build -p handcrafted-alpha-beta
+cargo build -p auto-tuned-classical
 ```
 
 Opening suites live in `setup/openings/*.toml`, pools live in `setup/pools/*.toml`, and event presets

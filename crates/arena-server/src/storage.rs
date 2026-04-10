@@ -19,7 +19,7 @@ use crate::{
 
 pub(crate) async fn insert_agent(db: &SqlitePool, agent: &Agent) -> Result<()> {
     sqlx::query(
-        "INSERT INTO agents (id, registry_key, name, protocol, tags, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO agents (id, registry_key, name, protocol, tags, notes, documentation, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
         .bind(agent.id.to_string())
         .bind(&agent.registry_key)
@@ -27,6 +27,7 @@ pub(crate) async fn insert_agent(db: &SqlitePool, agent: &Agent) -> Result<()> {
         .bind(encode_json(&agent.protocol)?)
         .bind(encode_json(&agent.tags)?)
         .bind(&agent.notes)
+        .bind(&agent.documentation)
         .bind(ts(agent.created_at))
         .execute(db)
         .await?;
@@ -35,13 +36,14 @@ pub(crate) async fn insert_agent(db: &SqlitePool, agent: &Agent) -> Result<()> {
 
 pub(crate) async fn update_agent(db: &SqlitePool, agent: &Agent) -> Result<()> {
     sqlx::query(
-        "UPDATE agents SET registry_key = ?, name = ?, protocol = ?, tags = ?, notes = ? WHERE id = ?",
+        "UPDATE agents SET registry_key = ?, name = ?, protocol = ?, tags = ?, notes = ?, documentation = ? WHERE id = ?",
     )
     .bind(&agent.registry_key)
     .bind(&agent.name)
     .bind(encode_json(&agent.protocol)?)
     .bind(encode_json(&agent.tags)?)
     .bind(&agent.notes)
+    .bind(&agent.documentation)
     .bind(agent.id.to_string())
     .execute(db)
     .await?;
@@ -73,6 +75,7 @@ fn agent_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Agent> {
         protocol: decode_json(&row.get::<String, _>("protocol"))?,
         tags: decode_json(&row.get::<String, _>("tags"))?,
         notes: row.get("notes"),
+        documentation: row.get("documentation"),
         created_at: parse_ts(row.get("created_at"))?,
     })
 }
@@ -80,8 +83,8 @@ fn agent_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Agent> {
 pub(crate) async fn insert_agent_version(db: &SqlitePool, version: &AgentVersion) -> Result<()> {
     sqlx::query(
         "INSERT INTO agent_versions (
-            id, registry_key, agent_id, version, active, executable_path, working_directory, args, env, capabilities, declared_name, tags, notes, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            id, registry_key, agent_id, version, active, executable_path, working_directory, args, env, capabilities, declared_name, tags, notes, documentation, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(version.id.to_string())
     .bind(&version.registry_key)
@@ -96,6 +99,7 @@ pub(crate) async fn insert_agent_version(db: &SqlitePool, version: &AgentVersion
     .bind(&version.declared_name)
     .bind(encode_json(&version.tags)?)
     .bind(&version.notes)
+    .bind(&version.documentation)
     .bind(ts(version.created_at))
     .execute(db)
     .await?;
@@ -105,7 +109,7 @@ pub(crate) async fn insert_agent_version(db: &SqlitePool, version: &AgentVersion
 pub(crate) async fn update_agent_version(db: &SqlitePool, version: &AgentVersion) -> Result<()> {
     sqlx::query(
         "UPDATE agent_versions SET
-            registry_key = ?, agent_id = ?, version = ?, active = ?, executable_path = ?, working_directory = ?, args = ?, env = ?, capabilities = ?, declared_name = ?, tags = ?, notes = ?
+            registry_key = ?, agent_id = ?, version = ?, active = ?, executable_path = ?, working_directory = ?, args = ?, env = ?, capabilities = ?, declared_name = ?, tags = ?, notes = ?, documentation = ?
         WHERE id = ?",
     )
     .bind(&version.registry_key)
@@ -120,6 +124,7 @@ pub(crate) async fn update_agent_version(db: &SqlitePool, version: &AgentVersion
     .bind(&version.declared_name)
     .bind(encode_json(&version.tags)?)
     .bind(&version.notes)
+    .bind(&version.documentation)
     .bind(version.id.to_string())
     .execute(db)
     .await?;
@@ -177,6 +182,7 @@ fn agent_version_from_row(row: sqlx::sqlite::SqliteRow) -> Result<AgentVersion> 
         declared_name: row.get("declared_name"),
         tags: decode_json(&row.get::<String, _>("tags"))?,
         notes: row.get("notes"),
+        documentation: row.get("documentation"),
         created_at: parse_ts(row.get("created_at"))?,
     })
 }

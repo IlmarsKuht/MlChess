@@ -1,0 +1,24 @@
+[package]
+name = "auto-tuned-classical"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[package.metadata.arena]
+launcher = "cargo_package"
+agent_key = "auto-tuned-classical"
+version_key = "v1"
+agent_name = "Auto-Tuned Classical"
+version_label = "v1"
+declared_name = "Auto-Tuned Classical"
+tags = ["classical", "auto-tuned", "spsa", "alpha-beta", "pvs"]
+notes = "Classical alpha-beta engine with the same search stack as the handcrafted baseline, but eval weights are loaded from a tuned parameter profile."
+documentation_file = "ENGINE.md"
+supports_chess960 = true
+
+[dependencies]
+anyhow.workspace = true
+cozy-chess.workspace = true
+engine-sdk = { path = "../../crates/engine-sdk" }
+serde.workspace = true
+serde_json.workspace = true

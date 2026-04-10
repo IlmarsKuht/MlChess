@@ -189,7 +189,7 @@ MODEL_PATH = "models/latest.pt"
     }
 
     #[tokio::test]
-    async fn removing_registry_entries_archives_versions_and_preserves_agents() {
+    async fn removing_registry_entries_deletes_missing_versions_and_agents() {
         let workspace = temp_workspace("registry-prune");
         write_registry_workspace(&workspace).unwrap();
         let db = new_test_db().await;
@@ -244,16 +244,12 @@ MODEL_PATH = "models/latest.pt"
 
         let agents = list_agents(&db).await.unwrap();
         let versions = list_agent_versions(&db, None).await.unwrap();
-        assert!(
-            agents
-                .iter()
-                .any(|agent| agent.registry_key.as_deref() == Some("material-plus"))
-        );
-        assert!(
-            versions.iter().any(|version| {
-                version.registry_key.as_deref() == Some("material-plus/v1") && !version.active
-            })
-        );
+        assert!(agents
+            .iter()
+            .any(|agent| agent.registry_key.as_deref() == Some("material-plus")));
+        assert!(!versions
+            .iter()
+            .any(|version| version.registry_key.as_deref() == Some("material-plus/v1")));
         assert!(
             versions.iter().any(|version| {
                 version.registry_key.as_deref() == Some("material-plus/dev") && version.active

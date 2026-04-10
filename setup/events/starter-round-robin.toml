@@ -1,8 +1,0 @@
-registry_key = "starter-round-robin"
-name = "Starter Round Robin"
-kind = "round_robin"
-pool_key = "starter-standard-pool"
-selection_mode = "all_active_engines"
-worker_count = 2
-games_per_pairing = 2
-active = true

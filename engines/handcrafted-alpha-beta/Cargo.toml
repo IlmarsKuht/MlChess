@@ -1,0 +1,22 @@
+[package]
+name = "handcrafted-alpha-beta"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[package.metadata.arena]
+launcher = "cargo_package"
+agent_key = "handcrafted-alpha-beta"
+version_key = "v1"
+agent_name = "Handcrafted Alpha-Beta"
+version_label = "v1"
+declared_name = "Handcrafted Alpha-Beta"
+tags = ["starter", "classical", "handcrafted", "alpha-beta", "pvs"]
+notes = "Single classical baseline: iterative deepening, PVS alpha-beta, quiescence, TT, tapered eval, and deep engine docs."
+documentation_file = "ENGINE.md"
+supports_chess960 = true
+
+[dependencies]
+anyhow.workspace = true
+cozy-chess.workspace = true
+engine-sdk = { path = "../../crates/engine-sdk" }

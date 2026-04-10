@@ -170,6 +170,10 @@ export function parseRoute(hash: string): RouteState {
     return { page: "watch", matchId: decodeURIComponent(parts[1]) };
   }
 
+  if (parts[0] === "engine" && parts[1]) {
+    return { page: "engine", engineId: decodeURIComponent(parts[1]) };
+  }
+
   switch (parts[0]) {
     case "setup":
       return { page: "app", view: "setup" };
@@ -209,6 +213,10 @@ export function viewHash(view: WorkspaceView) {
 
 export function watchHash(matchId: string) {
   return `#/watch/${encodeURIComponent(matchId)}`;
+}
+
+export function engineHash(engineId: string) {
+  return `#/engine/${encodeURIComponent(engineId)}`;
 }
 
 export function navigateToHash(hash: string) {

@@ -12,6 +12,7 @@ pub(crate) async fn init_db(db: &SqlitePool) -> Result<()> {
             protocol TEXT NOT NULL,
             tags TEXT NOT NULL,
             notes TEXT,
+            documentation TEXT,
             created_at TEXT NOT NULL
         )",
         "CREATE TABLE IF NOT EXISTS agent_versions (
@@ -28,6 +29,7 @@ pub(crate) async fn init_db(db: &SqlitePool) -> Result<()> {
             declared_name TEXT,
             tags TEXT NOT NULL,
             notes TEXT,
+            documentation TEXT,
             created_at TEXT NOT NULL,
             FOREIGN KEY(agent_id) REFERENCES agents(id) ON DELETE CASCADE
         )",
@@ -178,8 +180,10 @@ pub(crate) async fn init_db(db: &SqlitePool) -> Result<()> {
         sqlx::query(statement).execute(db).await?;
     }
     ensure_column(db, "agents", "registry_key", "TEXT").await?;
+    ensure_column(db, "agents", "documentation", "TEXT").await?;
     ensure_column(db, "agent_versions", "registry_key", "TEXT").await?;
     ensure_column(db, "agent_versions", "active", "INTEGER NOT NULL DEFAULT 1").await?;
+    ensure_column(db, "agent_versions", "documentation", "TEXT").await?;
     ensure_column(db, "benchmark_pools", "registry_key", "TEXT").await?;
     ensure_column(db, "opening_suites", "registry_key", "TEXT").await?;
     ensure_column(db, "event_presets", "registry_key", "TEXT").await?;
@@ -272,12 +276,13 @@ async fn ensure_foreign_key_schema(db: &SqlitePool) -> Result<()> {
             declared_name TEXT,
             tags TEXT NOT NULL,
             notes TEXT,
+            documentation TEXT,
             created_at TEXT NOT NULL,
             FOREIGN KEY(agent_id) REFERENCES agents(id) ON DELETE CASCADE
         )",
         "INSERT INTO agent_versions_new
-            (id, registry_key, agent_id, version, active, executable_path, working_directory, args, env, capabilities, declared_name, tags, notes, created_at)
-         SELECT id, registry_key, agent_id, version, COALESCE(active, 1), executable_path, working_directory, args, env, capabilities, declared_name, tags, notes, created_at
+            (id, registry_key, agent_id, version, active, executable_path, working_directory, args, env, capabilities, declared_name, tags, notes, documentation, created_at)
+         SELECT id, registry_key, agent_id, version, COALESCE(active, 1), executable_path, working_directory, args, env, capabilities, declared_name, tags, notes, documentation, created_at
          FROM agent_versions",
         "DROP TABLE agent_versions",
         "ALTER TABLE agent_versions_new RENAME TO agent_versions",

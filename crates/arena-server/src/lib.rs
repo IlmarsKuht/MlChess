@@ -228,14 +228,14 @@ mod tests {
         let pools = list_pools(&db).await.unwrap();
         let leaderboard = load_aggregate_leaderboard(&db).await.unwrap();
 
-        assert!(agents.len() >= 2);
-        assert!(versions.len() >= 2);
+        assert!(agents.len() >= 1);
+        assert!(versions.len() >= 1);
         assert!(
             pools
                 .iter()
                 .any(|pool| pool.name == "Starter Standard Pool")
         );
-        assert!(leaderboard.len() >= 2);
+        assert!(leaderboard.len() >= 1);
     }
 
     #[tokio::test]

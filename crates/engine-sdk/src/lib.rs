@@ -4,10 +4,11 @@ use anyhow::{Result, anyhow, bail};
 use arena_core::Variant;
 use cozy_chess::{Board, Color, Move, Piece, util};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct SearchContext {
     pub movetime_ms: u64,
     pub variant: Variant,
+    pub position_history_hashes: Vec<u64>,
 }
 
 pub trait UciEngine {
@@ -64,6 +65,7 @@ pub fn run_uci_loop<E: UciEngine>(engine: &mut E) -> Result<()> {
     let mut stdout = io::stdout();
     let mut board = Board::default();
     let mut variant = Variant::Standard;
+    let mut position_history_hashes = vec![board.hash()];
 
     for line in stdin.lock().lines() {
         let line = line?;
@@ -92,6 +94,7 @@ pub fn run_uci_loop<E: UciEngine>(engine: &mut E) -> Result<()> {
                 Variant::Standard => Board::startpos(),
                 Variant::Chess960 => Board::chess960_startpos(0),
             };
+            position_history_hashes = vec![board.hash()];
             engine.new_game(variant);
             continue;
         }
@@ -106,7 +109,9 @@ pub fn run_uci_loop<E: UciEngine>(engine: &mut E) -> Result<()> {
         }
 
         if let Some(rest) = command.strip_prefix("position ") {
-            board = parse_position_command(rest, variant)?;
+            let (next_board, next_history_hashes) = parse_position_command(rest, variant)?;
+            board = next_board;
+            position_history_hashes = next_history_hashes;
             continue;
         }
 
@@ -125,6 +130,7 @@ pub fn run_uci_loop<E: UciEngine>(engine: &mut E) -> Result<()> {
                 SearchContext {
                     movetime_ms,
                     variant,
+                    position_history_hashes: position_history_hashes.clone(),
                 },
             )?;
             if !board.is_legal(mv) {
@@ -152,7 +158,7 @@ fn parse_movetime(command: &str) -> Option<u64> {
         .and_then(|window| window[1].parse::<u64>().ok())
 }
 
-fn parse_position_command(command: &str, variant: Variant) -> Result<Board> {
+fn parse_position_command(command: &str, variant: Variant) -> Result<(Board, Vec<u64>)> {
     let parts: Vec<_> = command.split_whitespace().collect();
     if parts.is_empty() {
         bail!("missing position payload");
@@ -174,6 +180,7 @@ fn parse_position_command(command: &str, variant: Variant) -> Result<Board> {
     } else {
         bail!("unsupported position command: {command}");
     };
+    let mut history_hashes = vec![board.hash()];
 
     if let Some(moves_index) = parts.iter().position(|part| *part == "moves") {
         for mv in &parts[moves_index + 1..] {
@@ -182,8 +189,9 @@ fn parse_position_command(command: &str, variant: Variant) -> Result<Board> {
             board
                 .try_play(parsed)
                 .map_err(|err| anyhow!("illegal move in position command: {err}"))?;
+            history_hashes.push(board.hash());
         }
     }
 
-    Ok(board)
+    Ok((board, history_hashes))
 }

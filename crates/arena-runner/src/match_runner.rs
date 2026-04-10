@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Result, anyhow};
 use arena_core::{
@@ -10,6 +14,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use cozy_chess::{Board, Color, GameStatus, util};
 use uuid::Uuid;
+use tokio::time::timeout;
 
 use crate::{
     calculate_move_budget, classify_position, classify_terminal_board, pgn_from_moves,
@@ -156,9 +161,15 @@ pub async fn play_single_game(request: MatchRequest) -> Result<GameRecord> {
         };
 
         let move_started = Instant::now();
-        let selected = actor
-            .choose_move(&board, &start_fen, &move_history, movetime_ms, &mut logs)
-            .await;
+        let selected = timeout(
+            Duration::from_millis(
+                remaining
+                    .saturating_add(request.time_control.increment_ms)
+                    .saturating_add(250),
+            ),
+            actor.choose_move(&board, &start_fen, &move_history, movetime_ms, &mut logs),
+        )
+        .await;
         let elapsed_ms = move_started.elapsed().as_millis() as u64;
 
         let clock = match side {
@@ -179,7 +190,27 @@ pub async fn play_single_game(request: MatchRequest) -> Result<GameRecord> {
             break;
         }
 
-        let selected = selected?;
+        let selected = match selected {
+            Ok(Ok(selected)) => selected,
+            Ok(Err(_)) => {
+                result = if side == Color::White {
+                    GameResult::BlackWin
+                } else {
+                    GameResult::WhiteWin
+                };
+                termination = GameTermination::EngineFailure;
+                break;
+            }
+            Err(_) => {
+                result = if side == Color::White {
+                    GameResult::BlackWin
+                } else {
+                    GameResult::WhiteWin
+                };
+                termination = GameTermination::Timeout;
+                break;
+            }
+        };
         if selected == "0000" {
             result = GameResult::Draw;
             termination = GameTermination::EngineFailure;
@@ -378,6 +409,7 @@ mod tests {
             declared_name: Some("sample".to_string()),
             tags: vec!["test".to_string()],
             notes: None,
+            documentation: None,
             created_at: Utc::now(),
         }
     }

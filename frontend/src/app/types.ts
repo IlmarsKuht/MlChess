@@ -24,6 +24,7 @@ export type GameTermination =
   | "unknown";
 export type RouteState =
   | { page: "app"; view: WorkspaceView }
+  | { page: "engine"; engineId: string }
   | { page: "watch"; matchId: string };
 
 export interface Participant {
@@ -38,6 +39,7 @@ export interface Agent {
   name: string;
   tags: string[];
   notes?: string | null;
+  documentation?: string | null;
 }
 
 export interface AgentVersion {
@@ -52,6 +54,7 @@ export interface AgentVersion {
   declared_name?: string | null;
   tags: string[];
   notes?: string | null;
+  documentation?: string | null;
 }
 
 export interface TimeControl {

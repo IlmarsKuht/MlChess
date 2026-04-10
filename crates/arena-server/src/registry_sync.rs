@@ -60,6 +60,7 @@ async fn sync_agents_and_versions(
                 protocol: AgentProtocol::Uci,
                 tags: definition.tags.clone(),
                 notes: definition.notes.clone(),
+                documentation: definition.documentation.clone(),
                 created_at: Utc::now(),
             },
         };
@@ -68,7 +69,8 @@ async fn sync_agents_and_versions(
             || agent.name != definition.name
             || agent.protocol != AgentProtocol::Uci
             || agent.tags != definition.tags
-            || agent.notes != definition.notes;
+            || agent.notes != definition.notes
+            || agent.documentation != definition.documentation;
 
         if changed {
             agent.registry_key = Some(definition.registry_key.clone());
@@ -76,6 +78,7 @@ async fn sync_agents_and_versions(
             agent.protocol = AgentProtocol::Uci;
             agent.tags = definition.tags.clone();
             agent.notes = definition.notes.clone();
+            agent.documentation = definition.documentation.clone();
         }
 
         match existing {
@@ -113,6 +116,7 @@ async fn sync_agents_and_versions(
                 declared_name: definition.declared_name.clone(),
                 tags: definition.tags.clone(),
                 notes: definition.notes.clone(),
+                documentation: definition.documentation.clone(),
                 created_at: Utc::now(),
             },
         };
@@ -128,7 +132,8 @@ async fn sync_agents_and_versions(
             || version.capabilities != definition.capabilities
             || version.declared_name != definition.declared_name
             || version.tags != definition.tags
-            || version.notes != definition.notes;
+            || version.notes != definition.notes
+            || version.documentation != definition.documentation;
 
         if changed {
             version.registry_key = Some(definition.registry_key.clone());
@@ -143,6 +148,7 @@ async fn sync_agents_and_versions(
             version.declared_name = definition.declared_name.clone();
             version.tags = definition.tags.clone();
             version.notes = definition.notes.clone();
+            version.documentation = definition.documentation.clone();
         }
 
         match existing {
@@ -159,11 +165,25 @@ async fn sync_agents_and_versions(
     for version in existing_versions {
         if let Some(key) = version.registry_key.as_deref() {
             if !version_keys.contains(key) {
-                let mut archived = version.clone();
-                if archived.active {
-                    archived.active = false;
-                    update_agent_version(db, &archived).await?;
-                }
+                sqlx::query("DELETE FROM agent_versions WHERE id = ?")
+                    .bind(version.id.to_string())
+                    .execute(db)
+                    .await?;
+            }
+        }
+    }
+
+    let agent_keys = agent_defs
+        .iter()
+        .map(|definition| definition.registry_key.as_str())
+        .collect::<BTreeSet<_>>();
+    for agent in existing_agents {
+        if let Some(key) = agent.registry_key.as_deref() {
+            if !agent_keys.contains(key) {
+                sqlx::query("DELETE FROM agents WHERE id = ?")
+                    .bind(agent.id.to_string())
+                    .execute(db)
+                    .await?;
             }
         }
     }
