@@ -1,0 +1,22 @@
+[package]
+name = "king-safety-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[package.metadata.arena]
+launcher = "cargo_package"
+agent_key = "king-safety"
+version_key = "v1"
+agent_name = "King Safety"
+version_label = "v1"
+declared_name = "King Safety"
+tags = ["starter", "positional", "king-safety"]
+notes = "Shallow search that leans on king shelter, development, center control, and passed pawns."
+supports_chess960 = true
+
+[dependencies]
+anyhow.workspace = true
+cozy-chess.workspace = true
+engine-sdk = { path = "../../crates/engine-sdk" }
+rand.workspace = true

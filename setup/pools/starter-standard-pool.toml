@@ -1,0 +1,11 @@
+registry_key = "starter-standard-pool"
+name = "Starter Standard Pool"
+description = "Bundled baseline pool: standard chess, 60s + 1s, paired colors, starter openings."
+variant = "standard"
+initial_ms = 60000
+increment_ms = 1000
+paired_games = true
+swap_colors = true
+opening_suite_key = "starter-benchmark-suite"
+opening_seed = 7
+active = true

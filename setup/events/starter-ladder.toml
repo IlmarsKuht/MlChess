@@ -1,0 +1,8 @@
+registry_key = "starter-ladder"
+name = "Starter Ladder"
+kind = "ladder"
+pool_key = "starter-standard-pool"
+selection_mode = "all_active_engines"
+worker_count = 1
+games_per_pairing = 2
+active = true

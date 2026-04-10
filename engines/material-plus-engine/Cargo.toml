@@ -1,0 +1,22 @@
+[package]
+name = "material-plus-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[package.metadata.arena]
+launcher = "cargo_package"
+agent_key = "material-plus"
+version_key = "v1"
+agent_name = "Material Plus"
+version_label = "v1"
+declared_name = "Material Plus"
+tags = ["starter", "baseline", "material"]
+notes = "One-ply evaluator with capture ordering, center pressure, and mobility."
+supports_chess960 = true
+
+[dependencies]
+anyhow.workspace = true
+cozy-chess.workspace = true
+engine-sdk = { path = "../../crates/engine-sdk" }
+rand.workspace = true

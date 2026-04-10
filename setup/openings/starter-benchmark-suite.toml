@@ -1,0 +1,8 @@
+registry_key = "starter-benchmark-suite"
+name = "Starter Benchmark Suite"
+description = "Small opening suite for local benchmarking."
+variant = "standard"
+source_kind = "starter"
+source_file = "data/openings/starter.fens"
+active = true
+starter = true
