@@ -104,6 +104,7 @@ async fn sync_agents_and_versions(
                 registry_key: Some(definition.registry_key.clone()),
                 agent_id,
                 version: definition.version.clone(),
+                active: true,
                 executable_path: definition.executable_path.clone(),
                 working_directory: definition.working_directory.clone(),
                 args: definition.args.clone(),
@@ -119,6 +120,7 @@ async fn sync_agents_and_versions(
         let changed = version.registry_key.as_deref() != Some(definition.registry_key.as_str())
             || version.agent_id != agent_id
             || version.version != definition.version
+            || !version.active
             || version.executable_path != definition.executable_path
             || version.working_directory != definition.working_directory
             || version.args != definition.args
@@ -132,6 +134,7 @@ async fn sync_agents_and_versions(
             version.registry_key = Some(definition.registry_key.clone());
             version.agent_id = agent_id;
             version.version = definition.version.clone();
+            version.active = true;
             version.executable_path = definition.executable_path.clone();
             version.working_directory = definition.working_directory.clone();
             version.args = definition.args.clone();
@@ -156,25 +159,11 @@ async fn sync_agents_and_versions(
     for version in existing_versions {
         if let Some(key) = version.registry_key.as_deref() {
             if !version_keys.contains(key) {
-                sqlx::query("DELETE FROM agent_versions WHERE id = ?")
-                    .bind(version.id.to_string())
-                    .execute(db)
-                    .await?;
-            }
-        }
-    }
-
-    let agent_keys = agent_defs
-        .iter()
-        .map(|definition| definition.registry_key.as_str())
-        .collect::<BTreeSet<_>>();
-    for agent in existing_agents {
-        if let Some(key) = agent.registry_key.as_deref() {
-            if !agent_keys.contains(key) {
-                sqlx::query("DELETE FROM agents WHERE id = ?")
-                    .bind(agent.id.to_string())
-                    .execute(db)
-                    .await?;
+                let mut archived = version.clone();
+                if archived.active {
+                    archived.active = false;
+                    update_agent_version(db, &archived).await?;
+                }
             }
         }
     }

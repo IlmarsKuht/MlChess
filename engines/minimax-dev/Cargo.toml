@@ -1,18 +1,18 @@
 [package]
-name = "king-safety-engine"
+name = "minimax-dev"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [package.metadata.arena]
 launcher = "cargo_package"
-agent_key = "king-safety"
-version_key = "v1"
-agent_name = "King Safety"
-version_label = "v1"
-declared_name = "King Safety"
-tags = ["starter", "positional", "king-safety"]
-notes = "Shallow search that leans on king shelter, development, center control, and passed pawns."
+agent_key = "minimax"
+version_key = "dev"
+agent_name = "MiniMax"
+version_label = "dev"
+declared_name = "MiniMax"
+tags = ["starter", "search", "alpha-beta", "dev"]
+notes = "Mutable development version of MiniMax."
 supports_chess960 = true
 
 [dependencies]

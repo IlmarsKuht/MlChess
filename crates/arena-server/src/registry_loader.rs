@@ -367,28 +367,31 @@ fn split_engine_registrations(
     let mut versions = Vec::new();
 
     for manifest in manifests {
-        let agent_entry = AgentRegistration {
-            registry_key: manifest.agent_key.clone(),
-            name: manifest.agent_name.clone(),
-            tags: manifest.tags.clone(),
-            notes: manifest.notes.clone(),
-        };
-
-        match agents_by_key.get(&manifest.agent_key) {
-            Some(existing)
-                if existing.name != agent_entry.name
-                    || existing.tags != agent_entry.tags
-                    || existing.notes != agent_entry.notes =>
-            {
+        match agents_by_key.get_mut(&manifest.agent_key) {
+            Some(existing) if existing.name != manifest.agent_name => {
                 bail!(
-                    "conflicting agent metadata for key {}. All versions of one agent must share name/tags/notes",
+                    "conflicting agent metadata for key {}. All versions of one agent must share name",
                     manifest.agent_key
                 );
             }
-            None => {
-                agents_by_key.insert(manifest.agent_key.clone(), agent_entry);
+            Some(existing) => {
+                existing.tags.extend(manifest.tags.iter().cloned());
+                existing.tags = normalize_tags(std::mem::take(&mut existing.tags));
+                if existing.notes.is_none() {
+                    existing.notes = manifest.notes.clone();
+                }
             }
-            _ => {}
+            None => {
+                agents_by_key.insert(
+                    manifest.agent_key.clone(),
+                    AgentRegistration {
+                        registry_key: manifest.agent_key.clone(),
+                        name: manifest.agent_name.clone(),
+                        tags: manifest.tags.clone(),
+                        notes: manifest.notes.clone(),
+                    },
+                );
+            }
         }
 
         versions.push(AgentVersionRegistration {

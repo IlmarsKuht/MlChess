@@ -1,5 +1,5 @@
 [package]
-name = "material-plus-engine"
+name = "material-plus-dev"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,12 +7,12 @@ license.workspace = true
 [package.metadata.arena]
 launcher = "cargo_package"
 agent_key = "material-plus"
-version_key = "v1"
+version_key = "dev"
 agent_name = "Material Plus"
-version_label = "v1"
+version_label = "dev"
 declared_name = "Material Plus"
-tags = ["starter", "baseline", "material"]
-notes = "One-ply evaluator with capture ordering, center pressure, and mobility."
+tags = ["starter", "baseline", "material", "dev"]
+notes = "Mutable development version of Material Plus."
 supports_chess960 = true
 
 [dependencies]

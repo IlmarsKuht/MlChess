@@ -19,6 +19,7 @@ pub(crate) async fn init_db(db: &SqlitePool) -> Result<()> {
             registry_key TEXT,
             agent_id TEXT NOT NULL,
             version TEXT NOT NULL,
+            active INTEGER NOT NULL,
             executable_path TEXT NOT NULL,
             working_directory TEXT,
             args TEXT NOT NULL,
@@ -178,6 +179,7 @@ pub(crate) async fn init_db(db: &SqlitePool) -> Result<()> {
     }
     ensure_column(db, "agents", "registry_key", "TEXT").await?;
     ensure_column(db, "agent_versions", "registry_key", "TEXT").await?;
+    ensure_column(db, "agent_versions", "active", "INTEGER NOT NULL DEFAULT 1").await?;
     ensure_column(db, "benchmark_pools", "registry_key", "TEXT").await?;
     ensure_column(db, "opening_suites", "registry_key", "TEXT").await?;
     ensure_column(db, "event_presets", "registry_key", "TEXT").await?;
@@ -261,6 +263,7 @@ async fn ensure_foreign_key_schema(db: &SqlitePool) -> Result<()> {
             registry_key TEXT,
             agent_id TEXT NOT NULL,
             version TEXT NOT NULL,
+            active INTEGER NOT NULL,
             executable_path TEXT NOT NULL,
             working_directory TEXT,
             args TEXT NOT NULL,
@@ -273,8 +276,8 @@ async fn ensure_foreign_key_schema(db: &SqlitePool) -> Result<()> {
             FOREIGN KEY(agent_id) REFERENCES agents(id) ON DELETE CASCADE
         )",
         "INSERT INTO agent_versions_new
-            (id, registry_key, agent_id, version, executable_path, working_directory, args, env, capabilities, declared_name, tags, notes, created_at)
-         SELECT id, registry_key, agent_id, version, executable_path, working_directory, args, env, capabilities, declared_name, tags, notes, created_at
+            (id, registry_key, agent_id, version, active, executable_path, working_directory, args, env, capabilities, declared_name, tags, notes, created_at)
+         SELECT id, registry_key, agent_id, version, COALESCE(active, 1), executable_path, working_directory, args, env, capabilities, declared_name, tags, notes, created_at
          FROM agent_versions",
         "DROP TABLE agent_versions",
         "ALTER TABLE agent_versions_new RENAME TO agent_versions",

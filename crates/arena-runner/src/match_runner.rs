@@ -367,6 +367,7 @@ mod tests {
             registry_key: None,
             agent_id: Uuid::new_v4(),
             version: "0.1.0".to_string(),
+            active: true,
             executable_path: executable_path.to_string(),
             working_directory: None,
             args: Vec::new(),

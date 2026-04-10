@@ -80,13 +80,14 @@ fn agent_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Agent> {
 pub(crate) async fn insert_agent_version(db: &SqlitePool, version: &AgentVersion) -> Result<()> {
     sqlx::query(
         "INSERT INTO agent_versions (
-            id, registry_key, agent_id, version, executable_path, working_directory, args, env, capabilities, declared_name, tags, notes, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            id, registry_key, agent_id, version, active, executable_path, working_directory, args, env, capabilities, declared_name, tags, notes, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(version.id.to_string())
     .bind(&version.registry_key)
     .bind(version.agent_id.to_string())
     .bind(&version.version)
+    .bind(if version.active { 1 } else { 0 })
     .bind(&version.executable_path)
     .bind(&version.working_directory)
     .bind(encode_json(&version.args)?)
@@ -104,12 +105,13 @@ pub(crate) async fn insert_agent_version(db: &SqlitePool, version: &AgentVersion
 pub(crate) async fn update_agent_version(db: &SqlitePool, version: &AgentVersion) -> Result<()> {
     sqlx::query(
         "UPDATE agent_versions SET
-            registry_key = ?, agent_id = ?, version = ?, executable_path = ?, working_directory = ?, args = ?, env = ?, capabilities = ?, declared_name = ?, tags = ?, notes = ?
+            registry_key = ?, agent_id = ?, version = ?, active = ?, executable_path = ?, working_directory = ?, args = ?, env = ?, capabilities = ?, declared_name = ?, tags = ?, notes = ?
         WHERE id = ?",
     )
     .bind(&version.registry_key)
     .bind(version.agent_id.to_string())
     .bind(&version.version)
+    .bind(if version.active { 1 } else { 0 })
     .bind(&version.executable_path)
     .bind(&version.working_directory)
     .bind(encode_json(&version.args)?)
@@ -166,6 +168,7 @@ fn agent_version_from_row(row: sqlx::sqlite::SqliteRow) -> Result<AgentVersion> 
         registry_key: row.get("registry_key"),
         agent_id: Uuid::parse_str(&row.get::<String, _>("agent_id"))?,
         version: row.get("version"),
+        active: as_bool(row.get("active")),
         executable_path: row.get("executable_path"),
         working_directory: row.get("working_directory"),
         args: decode_json(&row.get::<String, _>("args"))?,

@@ -517,6 +517,7 @@ pub(crate) async fn resolve_preset_participants(
     let participants = match preset.selection_mode {
         EventPresetSelectionMode::AllActiveEngines => versions
             .into_iter()
+            .filter(|version| version.active)
             .filter(|version| !version.tags.iter().any(|tag| tag == "hidden"))
             .map(|version| version.id)
             .collect(),

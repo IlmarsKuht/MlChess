@@ -122,6 +122,7 @@ pub struct AgentVersion {
     pub registry_key: Option<String>,
     pub agent_id: Uuid,
     pub version: String,
+    pub active: bool,
     pub executable_path: String,
     pub working_directory: Option<String>,
     pub args: Vec<String>,

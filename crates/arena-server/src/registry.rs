@@ -99,6 +99,11 @@ mod tests {
         assert!(
             versions
                 .iter()
+                .any(|version| version.registry_key.as_deref() == Some("material-plus/dev"))
+        );
+        assert!(
+            versions
+                .iter()
                 .any(|version| version.registry_key.as_deref() == Some("python-ml/dev"))
         );
         assert!(
@@ -184,7 +189,7 @@ MODEL_PATH = "models/latest.pt"
     }
 
     #[tokio::test]
-    async fn removing_registry_entries_prunes_db_rows() {
+    async fn removing_registry_entries_archives_versions_and_preserves_agents() {
         let workspace = temp_workspace("registry-prune");
         write_registry_workspace(&workspace).unwrap();
         let db = new_test_db().await;
@@ -216,7 +221,7 @@ MODEL_PATH = "models/latest.pt"
         .await
         .unwrap();
 
-        fs::remove_dir_all(workspace.join("engines").join("material-plus-engine")).unwrap();
+        fs::remove_dir_all(workspace.join("engines").join("material-plus-v1")).unwrap();
         fs::remove_file(
             workspace
                 .join("setup")
@@ -237,12 +242,22 @@ MODEL_PATH = "models/latest.pt"
             .await
             .unwrap();
 
+        let agents = list_agents(&db).await.unwrap();
+        let versions = list_agent_versions(&db, None).await.unwrap();
         assert!(
-            !list_agents(&db)
-                .await
-                .unwrap()
+            agents
                 .iter()
                 .any(|agent| agent.registry_key.as_deref() == Some("material-plus"))
+        );
+        assert!(
+            versions.iter().any(|version| {
+                version.registry_key.as_deref() == Some("material-plus/v1") && !version.active
+            })
+        );
+        assert!(
+            versions.iter().any(|version| {
+                version.registry_key.as_deref() == Some("material-plus/dev") && version.active
+            })
         );
         assert!(list_pools(&db).await.unwrap().is_empty());
     }
@@ -266,15 +281,15 @@ resolver = "2"
         write_file(
             &root
                 .join("engines")
-                .join("material-plus-engine")
+                .join("material-plus-v1")
                 .join("Cargo.toml"),
             r#"[package]
-name = "material-plus-engine"
+name = "material-plus-v1"
 version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "material-plus-engine"
+name = "material-plus-v1"
 path = "src/main.rs"
 
 [package.metadata.arena]
@@ -292,7 +307,41 @@ supports_chess960 = true
         write_file(
             &root
                 .join("engines")
-                .join("material-plus-engine")
+                .join("material-plus-v1")
+                .join("src")
+                .join("main.rs"),
+            "fn main() {}\n",
+        )?;
+        write_file(
+            &root
+                .join("engines")
+                .join("material-plus-dev")
+                .join("Cargo.toml"),
+            r#"[package]
+name = "material-plus-dev"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "material-plus-dev"
+path = "src/main.rs"
+
+[package.metadata.arena]
+launcher = "cargo_package"
+agent_key = "material-plus"
+version_key = "dev"
+agent_name = "Material Plus"
+version_label = "dev"
+declared_name = "Material Plus"
+tags = ["starter", "baseline"]
+notes = "Mutable development version."
+supports_chess960 = true
+"#,
+        )?;
+        write_file(
+            &root
+                .join("engines")
+                .join("material-plus-dev")
                 .join("src")
                 .join("main.rs"),
             "fn main() {}\n",

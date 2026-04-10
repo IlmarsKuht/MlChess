@@ -1,5 +1,19 @@
 /target
 /arena.db
+/arena.db-shm
+/arena.db-wal
 /frontend/node_modules
 /frontend/dist
+/frontend/.vite
+/frontend/tsconfig.app.tsbuildinfo
 
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+*.tmp
+*.log
+
+# Local environment files
+.env
+.env.*
+!.env.example

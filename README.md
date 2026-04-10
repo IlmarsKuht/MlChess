@@ -34,16 +34,18 @@ Vite proxies `/api` requests to the Rust server during development.
 
 ## Code-Managed Setup
 
-- `material-plus-engine`: one-ply evaluator with mobility, center, and development bonuses
-- `minimax-engine`: fixed-depth negamax with alpha-beta pruning and a capture extension
-- `king-safety-engine`: shallow search with king shelter, center control, and passed-pawn bias
+- `material-plus-v1` / `material-plus-dev`: frozen release plus mutable development line for the Material Plus family
+- `minimax-v1` / `minimax-dev`: frozen release plus mutable development line for the MiniMax family
+- `king-safety-v1` / `king-safety-dev`: frozen release plus mutable development line for the King Safety family
 
 Rust engines live under `engines/*` and are discovered from `Cargo.toml` plus `[package.metadata.arena]`.
+Use a stable `agent_key` for an engine family and a unique `version_key` like `v1`, `v2`, or `dev`
+for each runnable version. Released versions should stay immutable; only `dev` should be edited.
 Command or ML engines can be added with `engines/<slug>/arena-engine.toml`. Keep a tiny
 placeholder `Cargo.toml` in that folder as well so the workspace glob remains valid.
 
 ```powershell
-cargo build -p material-plus-engine -p minimax-engine -p king-safety-engine
+cargo build -p material-plus-v1 -p material-plus-dev -p minimax-v1 -p minimax-dev -p king-safety-v1 -p king-safety-dev
 ```
 
 Opening suites live in `setup/openings/*.toml`, pools live in `setup/pools/*.toml`, and event presets

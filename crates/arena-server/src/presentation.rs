@@ -143,10 +143,12 @@ pub(crate) fn version_name_by_id(versions: &[AgentVersion]) -> HashMap<Uuid, Str
 }
 
 fn display_version_name(version: &AgentVersion) -> String {
-    version
+    let base = version
         .declared_name
         .clone()
-        .unwrap_or_else(|| format!("{} {}", version.agent_id, version.version))
+        .unwrap_or_else(|| version.agent_id.to_string());
+    let archived_suffix = if version.active { "" } else { " (archived)" };
+    format!("{base} {}{archived_suffix}", version.version)
 }
 
 pub(crate) fn participant_for_id(

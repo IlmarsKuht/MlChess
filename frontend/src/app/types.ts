@@ -45,6 +45,7 @@ export interface AgentVersion {
   registry_key?: string | null;
   agent_id: string;
   version: string;
+  active: boolean;
   executable_path: string;
   working_directory?: string | null;
   args: string[];
