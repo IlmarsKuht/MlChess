@@ -19,6 +19,23 @@ cargo run -p arena-server
 ```
 
 The API starts on `http://127.0.0.1:4000` and creates `arena.db` in the workspace root by default.
+The server serves prebuilt frontend files from `frontend/dist`, so frontend source changes need a frontend build first.
+
+## Build And Run Everything
+
+```powershell
+./run-all.ps1
+```
+
+This rebuilds the frontend, builds the Rust workspace, and then starts `arena-server`.
+
+## Build Everything
+
+```powershell
+./build-all.ps1
+```
+
+This rebuilds the React frontend into `frontend/dist` and then runs `cargo build --workspace`.
 
 ## Run The Frontend
 

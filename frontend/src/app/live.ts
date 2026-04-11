@@ -46,8 +46,8 @@ function frameFromSnapshot(snapshot: LiveMatchSnapshot): ConfirmedLiveFrame {
     fen: snapshot.fen,
     moves: snapshot.moves,
     move_uci: snapshot.moves.at(-1) ?? null,
-    white_time_left_ms: snapshot.white_time_left_ms,
-    black_time_left_ms: snapshot.black_time_left_ms,
+    white_time_left_ms: snapshot.white_remaining_ms,
+    black_time_left_ms: snapshot.black_remaining_ms,
     side_to_move: snapshot.side_to_move,
     status: snapshot.status,
     result: snapshot.result,
@@ -70,8 +70,8 @@ function snapshotFromEvent(current: LiveMatchSnapshot, event: LiveProtocolEvent)
         status: event.status,
         fen: event.fen,
         moves: event.moves,
-        white_time_left_ms: event.white_time_left_ms,
-        black_time_left_ms: event.black_time_left_ms,
+        white_remaining_ms: event.white_remaining_ms,
+        black_remaining_ms: event.black_remaining_ms,
         side_to_move: event.side_to_move,
         turn_started_server_unix_ms: event.turn_started_server_unix_ms
       };
@@ -82,8 +82,8 @@ function snapshotFromEvent(current: LiveMatchSnapshot, event: LiveProtocolEvent)
         seq: event.seq,
         server_now_unix_ms: event.server_now_unix_ms,
         status: event.status,
-        white_time_left_ms: event.white_time_left_ms,
-        black_time_left_ms: event.black_time_left_ms,
+        white_remaining_ms: event.white_remaining_ms,
+        black_remaining_ms: event.black_remaining_ms,
         side_to_move: event.side_to_move,
         turn_started_server_unix_ms: event.turn_started_server_unix_ms
       };
@@ -98,8 +98,8 @@ function snapshotFromEvent(current: LiveMatchSnapshot, event: LiveProtocolEvent)
         termination: event.termination,
         fen: event.fen,
         moves: event.moves,
-        white_time_left_ms: event.white_time_left_ms,
-        black_time_left_ms: event.black_time_left_ms,
+        white_remaining_ms: event.white_remaining_ms,
+        black_remaining_ms: event.black_remaining_ms,
         side_to_move: event.side_to_move,
         turn_started_server_unix_ms: event.turn_started_server_unix_ms
       };

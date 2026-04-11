@@ -176,8 +176,8 @@ export interface LiveMatchSnapshot {
   termination: GameTermination;
   fen: string;
   moves: string[];
-  white_time_left_ms: number;
-  black_time_left_ms: number;
+  white_remaining_ms: number;
+  black_remaining_ms: number;
   side_to_move: ProtocolLiveSide;
   turn_started_server_unix_ms: number;
 }
@@ -192,8 +192,8 @@ export interface MoveCommittedEvent {
   move_uci: string;
   fen: string;
   moves: string[];
-  white_time_left_ms: number;
-  black_time_left_ms: number;
+  white_remaining_ms: number;
+  black_remaining_ms: number;
   side_to_move: ProtocolLiveSide;
   turn_started_server_unix_ms: number;
 }
@@ -205,8 +205,8 @@ export interface ClockSyncEvent {
   seq: number;
   server_now_unix_ms: number;
   status: LiveStatus;
-  white_time_left_ms: number;
-  black_time_left_ms: number;
+  white_remaining_ms: number;
+  black_remaining_ms: number;
   side_to_move: ProtocolLiveSide;
   turn_started_server_unix_ms: number;
 }
@@ -222,8 +222,8 @@ export interface GameFinishedEvent {
   termination: GameTermination;
   fen: string;
   moves: string[];
-  white_time_left_ms: number;
-  black_time_left_ms: number;
+  white_remaining_ms: number;
+  black_remaining_ms: number;
   side_to_move: ProtocolLiveSide;
   turn_started_server_unix_ms: number;
 }
