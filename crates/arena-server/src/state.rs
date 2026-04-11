@@ -3,9 +3,8 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::Instant,
 };
 
 use anyhow::Result;
@@ -17,7 +16,10 @@ use tracing::error;
 use uuid::Uuid;
 
 use crate::{
-    ApiError, live::LiveMatchStore, orchestration::run_tournament, registry::SetupRegistryCache,
+    ApiError,
+    live::LiveMatchStore,
+    orchestration::run_tournament,
+    registry::SetupRegistryCache,
     storage::update_tournament_status,
 };
 
@@ -26,6 +28,7 @@ pub struct AppState {
     pub(crate) db: SqlitePool,
     pub(crate) coordinator: TournamentCoordinator,
     pub(crate) live_matches: LiveMatchStore,
+    pub(crate) live_metrics: LiveMetricsStore,
     pub(crate) human_games: HumanGameStore,
     pub(crate) frontend_dist: Option<PathBuf>,
     pub(crate) setup_registry: SetupRegistryCache,
@@ -39,6 +42,18 @@ pub(crate) struct TournamentCoordinator {
 #[derive(Clone, Default)]
 pub(crate) struct HumanGameStore {
     sessions: Arc<tokio::sync::RwLock<HashMap<Uuid, HumanGameSession>>>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct LiveMetricsStore {
+    pub(crate) published_events: Arc<AtomicU64>,
+    pub(crate) replay_requests: Arc<AtomicU64>,
+    pub(crate) replay_events_served: Arc<AtomicU64>,
+    pub(crate) snapshot_fallbacks: Arc<AtomicU64>,
+    pub(crate) restored_matches: Arc<AtomicU64>,
+    pub(crate) websocket_connections: Arc<AtomicU64>,
+    pub(crate) move_intent_errors: Arc<AtomicU64>,
+    pub(crate) timeout_fires: Arc<AtomicU64>,
 }
 
 #[derive(Clone)]
@@ -60,7 +75,6 @@ pub(crate) enum HumanGameCommand {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum HumanMoveAck {
     Accepted,
-    Duplicate,
     RejectedIllegal,
     RejectedNotYourTurn,
     RejectedGameFinished,
@@ -82,7 +96,6 @@ pub(crate) struct HumanGameRuntime {
     pub(crate) engine: Box<dyn AgentAdapter>,
     pub(crate) logs: Vec<arena_core::GameLogEntry>,
     pub(crate) started_at: DateTime<Utc>,
-    pub(crate) turn_started_at: Instant,
     pub(crate) turn_started_server_unix_ms: i64,
     pub(crate) seq: u64,
     pub(crate) seen_intents: HashMap<Uuid, HumanMoveAck>,
@@ -159,11 +172,34 @@ impl HumanGameStore {
         self.sessions.read().await.get(&match_id).cloned()
     }
 
-    pub(crate) async fn list(&self) -> Vec<HumanGameSession> {
-        self.sessions.read().await.values().cloned().collect()
-    }
-
     pub(crate) async fn remove(&self, match_id: Uuid) -> Option<HumanGameSession> {
         self.sessions.write().await.remove(&match_id)
     }
+}
+
+impl LiveMetricsStore {
+    pub(crate) fn snapshot(&self) -> LiveMetricsSnapshot {
+        LiveMetricsSnapshot {
+            published_events: self.published_events.load(Ordering::Relaxed),
+            replay_requests: self.replay_requests.load(Ordering::Relaxed),
+            replay_events_served: self.replay_events_served.load(Ordering::Relaxed),
+            snapshot_fallbacks: self.snapshot_fallbacks.load(Ordering::Relaxed),
+            restored_matches: self.restored_matches.load(Ordering::Relaxed),
+            websocket_connections: self.websocket_connections.load(Ordering::Relaxed),
+            move_intent_errors: self.move_intent_errors.load(Ordering::Relaxed),
+            timeout_fires: self.timeout_fires.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct LiveMetricsSnapshot {
+    pub(crate) published_events: u64,
+    pub(crate) replay_requests: u64,
+    pub(crate) replay_events_served: u64,
+    pub(crate) snapshot_fallbacks: u64,
+    pub(crate) restored_matches: u64,
+    pub(crate) websocket_connections: u64,
+    pub(crate) move_intent_errors: u64,
+    pub(crate) timeout_fires: u64,
 }

@@ -525,6 +525,16 @@ pub(crate) async fn list_match_series(
     rows.into_iter().map(match_series_from_row).collect()
 }
 
+pub(crate) async fn get_match_series(db: &SqlitePool, id: Uuid) -> Result<MatchSeries, ApiError> {
+    let row = sqlx::query("SELECT * FROM match_series WHERE id = ?")
+        .bind(id.to_string())
+        .fetch_optional(db)
+        .await?;
+    row.map(match_series_from_row)
+        .transpose()?
+        .ok_or_else(|| ApiError::NotFound(format!("match series {id} not found")))
+}
+
 pub(crate) async fn update_match_series_status(db: &SqlitePool, id: Uuid, status: MatchStatus) -> Result<()> {
     sqlx::query("UPDATE match_series SET status = ? WHERE id = ?")
         .bind(encode_json(&status)?)
@@ -1000,6 +1010,22 @@ pub(crate) async fn load_live_runtime_checkpoint(
         .fetch_optional(db)
         .await?;
     row.map(live_runtime_checkpoint_from_row).transpose()
+}
+
+pub(crate) async fn list_live_runtime_checkpoints(
+    db: &SqlitePool,
+    status: Option<arena_core::LiveStatus>,
+) -> Result<Vec<LiveRuntimeCheckpoint>> {
+    let rows = sqlx::query("SELECT * FROM live_runtime_checkpoints ORDER BY updated_at DESC")
+        .fetch_all(db)
+        .await?;
+    rows.into_iter()
+        .map(live_runtime_checkpoint_from_row)
+        .filter(|result| match result {
+            Ok(checkpoint) => status.map(|value| checkpoint.status == value).unwrap_or(true),
+            Err(_) => true,
+        })
+        .collect()
 }
 
 pub(crate) async fn load_live_runtime_events_since(

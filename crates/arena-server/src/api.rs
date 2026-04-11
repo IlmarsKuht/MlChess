@@ -1,16 +1,14 @@
-use std::convert::Infallible;
-
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::HeaderMap,
-    response::sse::{Event, KeepAlive, Sse},
+    extract::ws::{Message, WebSocket, WebSocketUpgrade},
     routing::{get, post},
 };
 use chrono::Utc;
-use futures::stream::{self, StreamExt};
 use serde::Deserialize;
+use serde::Serialize;
 use serde_json::{Value, json};
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -30,11 +28,13 @@ use crate::{
         get_agent_version, get_event_preset, get_game, get_opening_suite, get_pool,
         get_tournament, list_agent_versions, list_agents, list_event_presets, list_games,
         list_match_series, list_opening_suites, list_pools, list_tournaments,
+        load_live_runtime_events_since,
         load_aggregate_leaderboard, load_pool_leaderboard, load_rating_history,
         update_tournament_status,
     },
 };
 use arena_core::{LiveEventEnvelope, LiveMatchSnapshot};
+use crate::live::ReplayResult;
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
@@ -52,14 +52,14 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/event-presets/{id}/start", post(start_event_preset_handler))
         .route("/duels", post(create_live_duel_handler))
         .route("/human-games", post(create_human_game_handler))
-        .route("/human-games/{id}/move", post(submit_human_move_handler))
         .route("/human-player", get(get_human_player_handler))
         .route("/tournaments", get(list_tournaments_handler))
         .route("/tournaments/{id}", get(get_tournament_handler))
         .route("/tournaments/{id}/stop", post(stop_tournament_handler))
         .route("/matches", get(list_matches_handler))
         .route("/matches/{id}/live", get(get_live_match_handler))
-        .route("/matches/{id}/live/stream", get(stream_live_match_handler))
+        .route("/live/metrics", get(get_live_metrics_handler))
+        .route("/matches/{id}/live/ws", get(websocket_live_match_handler))
         .route("/games", get(list_games_handler))
         .route("/games/{id}", get(get_game_handler))
         .route("/games/{id}/replay", get(get_game_replay_handler))
@@ -97,12 +97,6 @@ struct CreateHumanGameRequest {
 }
 
 #[derive(Debug, Deserialize)]
-struct SubmitHumanMoveRequest {
-    intent_id: Option<Uuid>,
-    uci: String,
-}
-
-#[derive(Debug, Deserialize)]
 struct MatchesQuery {
     tournament_id: Option<Uuid>,
 }
@@ -122,6 +116,20 @@ struct LeaderboardQuery {
 struct RatingHistoryQuery {
     pool_id: Option<Uuid>,
     agent_version_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "message_type", rename_all = "snake_case")]
+enum LiveWsClientMessage {
+    Subscribe { last_seq: Option<u64> },
+    SubmitMove { intent_id: Option<Uuid>, move_uci: String },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "message_type", rename_all = "snake_case")]
+enum LiveWsServerMessage {
+    IntentAck { match_id: Uuid, intent_id: Uuid, ack: &'static str },
+    Error { error: String },
 }
 
 async fn sync_registry(state: &AppState) -> Result<(), ApiError> {
@@ -317,16 +325,6 @@ async fn create_human_game_handler(
     })))
 }
 
-async fn submit_human_move_handler(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    Json(payload): Json<SubmitHumanMoveRequest>,
-) -> Result<Json<Value>, ApiError> {
-    let intent_id = payload.intent_id.unwrap_or_else(Uuid::new_v4);
-    let ack = submit_human_move(state, id, intent_id, payload.uci).await?;
-    Ok(Json(json!({ "intent_id": intent_id, "ack": ack })))
-}
-
 async fn get_human_player_handler(
     State(state): State<AppState>,
 ) -> Result<Json<HumanPlayerProfile>, ApiError> {
@@ -362,33 +360,14 @@ async fn list_matches_handler(
     let mut matches: Vec<_> = list_match_series(&state.db, query.tournament_id)
         .await?
         .into_iter()
-        .map(|series| api_match_series(&series, &version_name_by_id, &human_player, false))
+        .map(|series| {
+            let interactive =
+                series.white_version_id == human_player.id || series.black_version_id == human_player.id;
+            api_match_series(&series, &version_name_by_id, &human_player, interactive)
+        })
         .collect();
-    let human_matches = state.human_games.list().await;
-    matches.extend(human_matches.into_iter().map(|session| {
-        api_match_series(
-            &session.match_series,
-            &version_name_by_id,
-            &session.human_player,
-            true,
-        )
-    }));
     matches.sort_by(|left, right| right.created_at.cmp(&left.created_at));
     Ok(Json(matches))
-}
-
-fn protocol_event(event: &LiveEventEnvelope) -> Event {
-    let (event_type, seq) = match event {
-        LiveEventEnvelope::Snapshot(value) => ("snapshot", value.seq),
-        LiveEventEnvelope::MoveCommitted(value) => ("move_committed", value.seq),
-        LiveEventEnvelope::ClockSync(value) => ("clock_sync", value.seq),
-        LiveEventEnvelope::GameFinished(value) => ("game_finished", value.seq),
-    };
-    Event::default()
-        .event(event_type)
-        .id(seq.to_string())
-        .json_data(event)
-        .expect("protocol event should serialize")
 }
 
 async fn get_live_match_handler(
@@ -404,48 +383,214 @@ async fn get_live_match_handler(
     Ok(Json(snapshot))
 }
 
-async fn stream_live_match_handler(
+async fn get_live_metrics_handler(State(state): State<AppState>) -> Json<crate::state::LiveMetricsSnapshot> {
+    Json(state.live_metrics.snapshot())
+}
+
+async fn websocket_live_match_handler(
+    ws: WebSocketUpgrade,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-    headers: HeaderMap,
-) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, ApiError> {
+) -> Result<impl axum::response::IntoResponse, ApiError> {
     state.live_matches.bootstrap_from_db(&state.db, id).await?;
-    let (initial_snapshot, receiver) = state
-        .live_matches
-        .subscribe(id)
-        .await
-        .ok_or_else(|| ApiError::NotFound(format!("live state for match {id} not found")))?;
-    let last_seq = headers
-        .get("last-event-id")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok());
-    let replay = if let Some(seq) = last_seq {
-        state.live_matches.replay_since(id, seq).await.unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    Ok(ws.on_upgrade(move |socket| handle_live_socket(state, id, socket)))
+}
 
-    let initial_events = if replay.is_empty() {
-        vec![LiveEventEnvelope::Snapshot(initial_snapshot)]
-    } else {
-        replay
-    };
-    let initial_stream = stream::iter(
-        initial_events
-            .into_iter()
-            .map(|event| Ok::<Event, Infallible>(protocol_event(&event))),
-    );
-    let updates = stream::unfold(receiver, |mut receiver| async move {
-        loop {
-            match receiver.recv().await {
-                Ok(event) => return Some((Ok(protocol_event(&event)), receiver)),
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+async fn handle_live_socket(state: AppState, match_id: Uuid, mut socket: WebSocket) {
+    state
+        .live_metrics
+        .websocket_connections
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut subscribed = false;
+    let mut receiver: Option<tokio::sync::broadcast::Receiver<LiveEventEnvelope>> = None;
+
+    loop {
+        tokio::select! {
+            maybe_message = socket.recv() => {
+                let Some(Ok(message)) = maybe_message else {
+                    break;
+                };
+                match message {
+                    Message::Text(text) => {
+                        let Ok(client_message) = serde_json::from_str::<LiveWsClientMessage>(&text) else {
+                            let _ = send_ws_error(&mut socket, "Malformed live websocket message").await;
+                            continue;
+                        };
+                        match client_message {
+                            LiveWsClientMessage::Subscribe { last_seq } => {
+                                match subscribe_live_socket(&state, match_id, last_seq).await {
+                                    Ok((initial_events, next_receiver)) => {
+                                        receiver = Some(next_receiver);
+                                        subscribed = true;
+                                        for event in initial_events {
+                                            if send_live_event(&mut socket, &event).await.is_err() {
+                                                return;
+                                            }
+                                        }
+                                    }
+                                    Err(err) => {
+                                        state
+                                            .live_metrics
+                                            .move_intent_errors
+                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        let _ = send_ws_error(&mut socket, &err.to_string()).await;
+                                    }
+                                }
+                            }
+                            LiveWsClientMessage::SubmitMove { intent_id, move_uci } => {
+                                let intent_id = intent_id.unwrap_or_else(Uuid::new_v4);
+                                match submit_human_move(state.clone(), match_id, intent_id, move_uci).await {
+                                    Ok(ack) => {
+                                        if send_ws_json(
+                                            &mut socket,
+                                            &LiveWsServerMessage::IntentAck { match_id, intent_id, ack }
+                                        ).await.is_err() {
+                                            return;
+                                        }
+                                    }
+                                    Err(err) => {
+                                        let _ = send_ws_error(&mut socket, &err.to_string()).await;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Message::Ping(payload) => {
+                        if socket.send(Message::Pong(payload)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Message::Close(_) => break,
+                    _ => {}
+                }
+            }
+            received = async {
+                match receiver.as_mut() {
+                    Some(value) => value.recv().await.ok(),
+                    None => None,
+                }
+            }, if subscribed => {
+                let Some(event) = received else {
+                    continue;
+                };
+                if send_live_event(&mut socket, &event).await.is_err() {
+                    break;
+                }
             }
         }
-    });
+    }
+}
 
-    Ok(Sse::new(initial_stream.chain(updates)).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(12)).text("heartbeat")))
+async fn subscribe_live_socket(
+    state: &AppState,
+    match_id: Uuid,
+    last_seq: Option<u64>,
+) -> Result<(Vec<LiveEventEnvelope>, tokio::sync::broadcast::Receiver<LiveEventEnvelope>), ApiError> {
+    state.live_matches.bootstrap_from_db(&state.db, match_id).await?;
+    let (snapshot, receiver) = state
+        .live_matches
+        .subscribe(match_id)
+        .await
+        .ok_or_else(|| ApiError::NotFound(format!("live state for match {match_id} not found")))?;
+    let initial_events = initial_stream_events(state, match_id, last_seq, snapshot).await;
+    Ok((initial_events, receiver))
+}
+
+async fn send_live_event(socket: &mut WebSocket, event: &LiveEventEnvelope) -> Result<(), axum::Error> {
+    socket.send(Message::Text(serde_json::to_string(event).expect("event should serialize").into())).await
+}
+
+async fn send_ws_json(socket: &mut WebSocket, message: &LiveWsServerMessage) -> Result<(), axum::Error> {
+    socket.send(Message::Text(serde_json::to_string(message).expect("message should serialize").into())).await
+}
+
+async fn send_ws_error(socket: &mut WebSocket, error: &str) -> Result<(), axum::Error> {
+    send_ws_json(socket, &LiveWsServerMessage::Error { error: error.to_string() }).await
+}
+
+async fn initial_stream_events(
+    state: &AppState,
+    match_id: Uuid,
+    last_seq: Option<u64>,
+    initial_snapshot: LiveMatchSnapshot,
+) -> Vec<LiveEventEnvelope> {
+    match last_seq {
+        Some(seq) => match state.live_matches.replay_since(match_id, seq).await {
+            Some(ReplayResult::Replay(events)) if !events.is_empty() => {
+                state
+                    .live_metrics
+                    .replay_requests
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                state
+                    .live_metrics
+                    .replay_events_served
+                    .fetch_add(events.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                info!(match_id = %match_id, from_seq = seq, replay_count = events.len(), "serving live replay events");
+                events
+            }
+            Some(ReplayResult::Replay(_)) => {
+                state
+                    .live_metrics
+                    .replay_requests
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                state
+                    .live_metrics
+                    .snapshot_fallbacks
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                info!(match_id = %match_id, from_seq = seq, "replay request already up to date, sending snapshot");
+                vec![LiveEventEnvelope::Snapshot(initial_snapshot)]
+            }
+            Some(ReplayResult::SnapshotRequired) => {
+                state
+                    .live_metrics
+                    .replay_requests
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                state
+                    .live_metrics
+                    .snapshot_fallbacks
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                warn!(match_id = %match_id, from_seq = seq, "live replay gap exceeded buffer, falling back to snapshot");
+                vec![LiveEventEnvelope::Snapshot(initial_snapshot)]
+            }
+            None => {
+                state
+                    .live_metrics
+                    .replay_requests
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                state
+                    .live_metrics
+                    .snapshot_fallbacks
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                warn!(match_id = %match_id, from_seq = seq, "live replay state missing, falling back to snapshot");
+                vec![LiveEventEnvelope::Snapshot(initial_snapshot)]
+            }
+        },
+        None => match load_live_runtime_events_since(&state.db, match_id, 0).await {
+            Ok(events) if !events.is_empty() => {
+                state
+                    .live_metrics
+                    .replay_events_served
+                    .fetch_add(events.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                info!(match_id = %match_id, replay_count = events.len(), "serving full live history bootstrap");
+                events
+            }
+            Ok(_) => {
+                state
+                    .live_metrics
+                    .snapshot_fallbacks
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                vec![LiveEventEnvelope::Snapshot(initial_snapshot)]
+            }
+            Err(err) => {
+                state
+                    .live_metrics
+                    .snapshot_fallbacks
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                warn!(match_id = %match_id, "failed to load live history bootstrap: {err:#}");
+                vec![LiveEventEnvelope::Snapshot(initial_snapshot)]
+            }
+        },
+    }
 }
 
 async fn list_games_handler(
@@ -530,4 +675,147 @@ async fn get_rating_history_handler(
     Ok(Json(
         load_rating_history(&state.db, query.pool_id, query.agent_version_id).await?,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        db::init_db,
+        live::{move_committed_from_checkpoint, snapshot_from_checkpoint},
+        registry::{SetupRegistryCache, sync_setup_registry_if_changed},
+        state::{HumanGameStore, TournamentCoordinator},
+        storage::{insert_live_runtime_event, upsert_live_runtime_checkpoint},
+    };
+    use arena_core::{LiveResult, LiveRuntimeCheckpoint, LiveStatus, LiveTermination, ProtocolLiveSide};
+    use chrono::Utc;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn setup_state() -> AppState {
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        init_db(&db).await.unwrap();
+        let setup_registry = SetupRegistryCache::default();
+        sync_setup_registry_if_changed(&db, &setup_registry)
+            .await
+            .unwrap();
+        AppState {
+            db,
+            coordinator: TournamentCoordinator::default(),
+            live_matches: crate::live::LiveMatchStore::default(),
+            live_metrics: crate::state::LiveMetricsStore::default(),
+            human_games: HumanGameStore::default(),
+            frontend_dist: None,
+            setup_registry,
+        }
+    }
+
+    fn checkpoint(match_id: Uuid, seq: u64, moves: &[&str]) -> LiveRuntimeCheckpoint {
+        LiveRuntimeCheckpoint {
+            match_id,
+            seq,
+            status: LiveStatus::Running,
+            result: LiveResult::None,
+            termination: LiveTermination::None,
+            fen: if moves.is_empty() {
+                "4k3/8/8/8/8/8/8/4K3 w - - 0 1".to_string()
+            } else {
+                "4k3/8/8/8/8/8/8/4K3 b - - 0 1".to_string()
+            },
+            moves: moves.iter().map(|value| (*value).to_string()).collect(),
+            white_remaining_ms: 60_000,
+            black_remaining_ms: 60_000,
+            side_to_move: if moves.is_empty() {
+                ProtocolLiveSide::White
+            } else {
+                ProtocolLiveSide::Black
+            },
+            turn_started_server_unix_ms: Utc::now().timestamp_millis(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn initial_stream_events_prefers_replay_when_available() {
+        let state = setup_state().await;
+        let match_id = Uuid::new_v4();
+        let first = checkpoint(match_id, 1, &[]);
+        let second = checkpoint(match_id, 2, &["e2e4"]);
+        upsert_live_runtime_checkpoint(&state.db, &second).await.unwrap();
+        insert_live_runtime_event(
+            &state.db,
+            &LiveEventEnvelope::Snapshot(snapshot_from_checkpoint(&first)),
+        )
+        .await
+        .unwrap();
+        insert_live_runtime_event(
+            &state.db,
+            &LiveEventEnvelope::MoveCommitted(move_committed_from_checkpoint(&second)),
+        )
+        .await
+        .unwrap();
+        state.live_matches.bootstrap_from_db(&state.db, match_id).await.unwrap();
+
+        let events =
+            initial_stream_events(&state, match_id, Some(1), snapshot_from_checkpoint(&second)).await;
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], LiveEventEnvelope::MoveCommitted(_)));
+    }
+
+    #[tokio::test]
+    async fn initial_stream_events_falls_back_to_snapshot_after_gap() {
+        let state = setup_state().await;
+        let match_id = Uuid::new_v4();
+        let latest = checkpoint(match_id, 200, &["e2e4"]);
+        upsert_live_runtime_checkpoint(&state.db, &latest).await.unwrap();
+        for seq in 73..=200 {
+            let event_checkpoint = LiveRuntimeCheckpoint {
+                seq,
+                ..latest.clone()
+            };
+            let event = if seq == 73 {
+                LiveEventEnvelope::Snapshot(snapshot_from_checkpoint(&event_checkpoint))
+            } else {
+                LiveEventEnvelope::MoveCommitted(move_committed_from_checkpoint(&event_checkpoint))
+            };
+            insert_live_runtime_event(&state.db, &event).await.unwrap();
+        }
+        state.live_matches.bootstrap_from_db(&state.db, match_id).await.unwrap();
+
+        let events =
+            initial_stream_events(&state, match_id, Some(1), snapshot_from_checkpoint(&latest)).await;
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], LiveEventEnvelope::Snapshot(_)));
+    }
+
+    #[tokio::test]
+    async fn initial_stream_events_bootstraps_with_full_history_for_new_watcher() {
+        let state = setup_state().await;
+        let match_id = Uuid::new_v4();
+        let first = checkpoint(match_id, 1, &[]);
+        let second = checkpoint(match_id, 2, &["e2e4"]);
+        upsert_live_runtime_checkpoint(&state.db, &second).await.unwrap();
+        insert_live_runtime_event(
+            &state.db,
+            &LiveEventEnvelope::Snapshot(snapshot_from_checkpoint(&first)),
+        )
+        .await
+        .unwrap();
+        insert_live_runtime_event(
+            &state.db,
+            &LiveEventEnvelope::MoveCommitted(move_committed_from_checkpoint(&second)),
+        )
+        .await
+        .unwrap();
+        state.live_matches.bootstrap_from_db(&state.db, match_id).await.unwrap();
+
+        let events =
+            initial_stream_events(&state, match_id, None, snapshot_from_checkpoint(&second)).await;
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0], LiveEventEnvelope::Snapshot(_)));
+        assert!(matches!(events[1], LiveEventEnvelope::MoveCommitted(_)));
+    }
 }

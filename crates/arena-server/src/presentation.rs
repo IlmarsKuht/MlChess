@@ -1,10 +1,8 @@
 use std::collections::HashMap;
 
 use arena_core::{
-    AgentVersion, GameRecord, GameResult, LeaderboardEntry, LiveGameFrame, LiveGameState,
-    LiveSide, MatchSeries, MatchStatus, Variant,
+    AgentVersion, GameRecord, GameResult, LeaderboardEntry, MatchSeries, MatchStatus, Variant,
 };
-use axum::response::sse::Event;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use uuid::Uuid;
@@ -63,44 +61,6 @@ pub(crate) struct ApiGameRecord {
     pub(crate) completed_at: DateTime<Utc>,
     pub(crate) white_participant: ApiParticipant,
     pub(crate) black_participant: ApiParticipant,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct ApiLiveGameFrame {
-    pub(crate) ply: u32,
-    pub(crate) fen: String,
-    pub(crate) move_uci: Option<String>,
-    pub(crate) white_time_left_ms: u64,
-    pub(crate) black_time_left_ms: u64,
-    pub(crate) updated_at: DateTime<Utc>,
-    pub(crate) side_to_move: LiveSide,
-    pub(crate) status: MatchStatus,
-    pub(crate) result: Option<GameResult>,
-    pub(crate) termination: Option<arena_core::GameTermination>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct ApiLiveGameState {
-    pub(crate) match_id: Uuid,
-    pub(crate) tournament_id: Uuid,
-    pub(crate) pool_id: Uuid,
-    pub(crate) variant: Variant,
-    pub(crate) white_version_id: Uuid,
-    pub(crate) black_version_id: Uuid,
-    pub(crate) start_fen: String,
-    pub(crate) current_fen: String,
-    pub(crate) moves_uci: Vec<String>,
-    pub(crate) white_time_left_ms: u64,
-    pub(crate) black_time_left_ms: u64,
-    pub(crate) status: MatchStatus,
-    pub(crate) result: Option<GameResult>,
-    pub(crate) termination: Option<arena_core::GameTermination>,
-    pub(crate) updated_at: DateTime<Utc>,
-    pub(crate) live_frames: Vec<ApiLiveGameFrame>,
-    pub(crate) white_participant: ApiParticipant,
-    pub(crate) black_participant: ApiParticipant,
-    pub(crate) interactive: bool,
-    pub(crate) human_turn: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -225,55 +185,6 @@ pub(crate) fn api_game_record(
     }
 }
 
-pub(crate) fn api_live_game_state(
-    live_state: &LiveGameState,
-    version_name_by_id: &HashMap<Uuid, String>,
-    human_player: &HumanPlayer,
-    interactive: bool,
-) -> ApiLiveGameState {
-    let human_turn = live_state.status == MatchStatus::Running
-        && ((live_state.white_version_id == human_player.id && side_to_move(&live_state.current_fen) == cozy_chess::Color::White)
-            || (live_state.black_version_id == human_player.id
-                && side_to_move(&live_state.current_fen) == cozy_chess::Color::Black));
-    ApiLiveGameState {
-        match_id: live_state.match_id,
-        tournament_id: live_state.tournament_id,
-        pool_id: live_state.pool_id,
-        variant: live_state.variant,
-        white_version_id: live_state.white_version_id,
-        black_version_id: live_state.black_version_id,
-        start_fen: live_state.start_fen.clone(),
-        current_fen: live_state.current_fen.clone(),
-        moves_uci: live_state.moves_uci.clone(),
-        white_time_left_ms: live_state.white_time_left_ms,
-        black_time_left_ms: live_state.black_time_left_ms,
-        status: live_state.status,
-        result: live_state.result,
-        termination: live_state.termination,
-        updated_at: live_state.updated_at,
-        live_frames: live_state.live_frames.iter().map(api_live_game_frame).collect(),
-        white_participant: participant_for_id(live_state.white_version_id, version_name_by_id, human_player),
-        black_participant: participant_for_id(live_state.black_version_id, version_name_by_id, human_player),
-        interactive,
-        human_turn,
-    }
-}
-
-fn api_live_game_frame(frame: &LiveGameFrame) -> ApiLiveGameFrame {
-    ApiLiveGameFrame {
-        ply: frame.ply,
-        fen: frame.fen.clone(),
-        move_uci: frame.move_uci.clone(),
-        white_time_left_ms: frame.white_time_left_ms,
-        black_time_left_ms: frame.black_time_left_ms,
-        updated_at: frame.updated_at,
-        side_to_move: frame.side_to_move.clone(),
-        status: frame.status,
-        result: frame.result,
-        termination: frame.termination,
-    }
-}
-
 pub(crate) fn api_leaderboard_entry(
     entry: LeaderboardEntry,
     version_name_by_id: &HashMap<Uuid, String>,
@@ -287,31 +198,4 @@ pub(crate) fn api_leaderboard_entry(
         draws: entry.draws,
         losses: entry.losses,
     }
-}
-
-pub(crate) fn live_game_event<T: Serialize>(state: &T) -> Event {
-    Event::default()
-        .event("live_game")
-        .json_data(state)
-        .expect("live game state should serialize to JSON")
-}
-
-pub(crate) fn is_terminal_live_status(status: MatchStatus) -> bool {
-    matches!(
-        status,
-        MatchStatus::Completed | MatchStatus::Failed | MatchStatus::Skipped
-    )
-}
-
-fn side_to_move(fen: &str) -> cozy_chess::Color {
-    fen.split_whitespace()
-        .nth(1)
-        .map(|token| {
-            if token == "b" {
-                cozy_chess::Color::Black
-            } else {
-                cozy_chess::Color::White
-            }
-        })
-        .unwrap_or(cozy_chess::Color::White)
 }

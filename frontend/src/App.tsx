@@ -125,7 +125,8 @@ export default function App() {
   const replayFrames = buildReplayFrames(replay);
   const currentFen = replayFrames[Math.min(selectedPly, Math.max(replayFrames.length - 1, 0))];
   const boardSquares = currentFen ? fenToBoard(currentFen) : [];
-  const confirmedLiveSnapshot = useConfirmedLiveMatch(selectedLiveMatchId);
+  const confirmedLiveMatch = useConfirmedLiveMatch(selectedLiveMatchId);
+  const confirmedLiveSnapshot = confirmedLiveMatch.snapshot;
   const selectedLiveMatch = matches.find((match) => match.id === selectedLiveMatchId) ?? null;
   const liveVariant = selectedLiveMatch ? poolById[selectedLiveMatch.pool_id]?.variant ?? "standard" : "standard";
   const rawLiveGame =
@@ -144,20 +145,19 @@ export default function App() {
           result: confirmedLiveSnapshot.result === "none" ? null : confirmedLiveSnapshot.result,
           termination: confirmedLiveSnapshot.termination === "none" ? null : confirmedLiveSnapshot.termination,
           updated_at: new Date(confirmedLiveSnapshot.server_now_unix_ms).toISOString(),
-          live_frames: [
-            {
-              ply: confirmedLiveSnapshot.moves.length,
-              fen: confirmedLiveSnapshot.fen,
-              move_uci: confirmedLiveSnapshot.moves.at(-1) ?? null,
-              white_time_left_ms: confirmedLiveSnapshot.white_time_left_ms,
-              black_time_left_ms: confirmedLiveSnapshot.black_time_left_ms,
-              updated_at: new Date(confirmedLiveSnapshot.server_now_unix_ms).toISOString(),
-              side_to_move: confirmedLiveSnapshot.side_to_move === "black" ? "black" : "white",
-              status: confirmedLiveSnapshot.status,
-              result: confirmedLiveSnapshot.result === "none" ? null : confirmedLiveSnapshot.result,
-              termination: confirmedLiveSnapshot.termination === "none" ? null : confirmedLiveSnapshot.termination
-            }
-          ],
+          live_frames: confirmedLiveMatch.timeline.map((frame) => ({
+            ply: frame.moves.length,
+            fen: frame.fen,
+            move_uci: frame.move_uci,
+            white_time_left_ms: frame.white_time_left_ms,
+            black_time_left_ms: frame.black_time_left_ms,
+            updated_at: new Date(frame.server_now_unix_ms).toISOString(),
+            turn_started_server_unix_ms: frame.turn_started_server_unix_ms,
+            side_to_move: frame.side_to_move === "black" ? "black" : "white",
+            status: frame.status,
+            result: frame.result === "none" ? null : frame.result,
+            termination: frame.termination === "none" ? null : frame.termination
+          })),
           white_participant: selectedLiveMatch.white_participant,
           black_participant: selectedLiveMatch.black_participant,
           interactive: selectedLiveMatch.interactive,
@@ -183,7 +183,7 @@ export default function App() {
   const visibleLiveUpdatedAtMs = visibleLiveFrame ? new Date(visibleLiveFrame.updated_at).getTime() : 0;
   const runningClockElapsedMs =
     visibleLiveFrame && visibleLiveFrame.status === "running"
-      ? Math.max(0, liveNowMs - visibleLiveUpdatedAtMs)
+      ? Math.max(0, liveNowMs - visibleLiveFrame.turn_started_server_unix_ms)
       : 0;
   const displayedWhiteClockMs =
     visibleLiveFrame && visibleLiveFrame.side_to_move === "white"
@@ -353,6 +353,12 @@ export default function App() {
       setHumanEngineId(versions[0].id);
     }
   }, [humanEngineId, versions]);
+
+  useEffect(() => {
+    if (confirmedLiveMatch.error) {
+      setError(confirmedLiveMatch.error);
+    }
+  }, [confirmedLiveMatch.error]);
 
   useEffect(() => {
     if (route.page === "watch" && route.matchId && route.matchId !== selectedLiveMatchId) {
@@ -615,11 +621,7 @@ export default function App() {
     setIsSubmittingHumanMove(true);
     setError("");
     try {
-      const intentId = crypto.randomUUID();
-      await fetchJson(`/human-games/${rawLiveGame.match_id}/move`, {
-        method: "POST",
-        body: JSON.stringify({ intent_id: intentId, uci })
-      });
+      await confirmedLiveMatch.submitMove(uci);
       setSelectedBoardSquare("");
     } catch (moveError) {
       setError(loadErrorMessage(moveError));
@@ -786,7 +788,9 @@ export default function App() {
                             ? "Submitting move..."
                             : "Your turn: click a piece, then click its destination."
                           : "Engine is thinking."
-                        : "Viewer is delayed slightly for readability."}
+                        : confirmedLiveMatch.isConnected
+                          ? "Viewer is delayed slightly for readability."
+                          : "Reconnecting live feed..."}
                     </span>
                     {!isLiveFollowing ? (
                       <button type="button" className="button-ghost" onClick={() => setIsLiveFollowing(true)}>

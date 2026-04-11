@@ -222,6 +222,8 @@ pub(crate) async fn init_db(db: &SqlitePool) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) async fn clear_session_event_history(db: &SqlitePool) -> Result<()> {
     let mut tx = db.begin().await?;
     sqlx::query("DELETE FROM games").execute(&mut *tx).await?;

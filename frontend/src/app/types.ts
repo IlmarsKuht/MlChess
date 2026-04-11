@@ -230,6 +230,32 @@ export interface GameFinishedEvent {
 
 export type LiveProtocolEvent = LiveMatchSnapshot | MoveCommittedEvent | ClockSyncEvent | GameFinishedEvent;
 
+export interface LiveIntentAck {
+  message_type: "intent_ack";
+  match_id: string;
+  intent_id: string;
+  ack: "accepted" | "duplicate";
+}
+
+export interface LiveErrorMessage {
+  message_type: "error";
+  error: string;
+}
+
+export interface LiveSubscribeMessage {
+  message_type: "subscribe";
+  last_seq?: number;
+}
+
+export interface LiveSubmitMoveMessage {
+  message_type: "submit_move";
+  intent_id?: string;
+  move_uci: string;
+}
+
+export type LiveWsServerMessage = LiveProtocolEvent | LiveIntentAck | LiveErrorMessage;
+export type LiveWsClientMessage = LiveSubscribeMessage | LiveSubmitMoveMessage;
+
 export interface HumanPlayerProfile {
   id: string;
   name: string;
