@@ -1,6 +1,7 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Serialize, de::DeserializeOwned};
+use serde_json::Value;
 use sqlx::{Row, SqlitePool};
 
 pub(crate) async fn init_db(db: &SqlitePool) -> Result<()> {
@@ -198,6 +199,22 @@ pub(crate) async fn init_db(db: &SqlitePool) -> Result<()> {
             created_at TEXT NOT NULL,
             PRIMARY KEY(match_id, seq)
         )",
+        "CREATE TABLE IF NOT EXISTS request_journal (
+            request_id TEXT PRIMARY KEY,
+            client_action_id TEXT,
+            client_route TEXT,
+            client_ts TEXT,
+            method TEXT NOT NULL,
+            route TEXT NOT NULL,
+            status_code INTEGER NOT NULL,
+            match_id TEXT,
+            tournament_id TEXT,
+            game_id TEXT,
+            started_at TEXT NOT NULL,
+            completed_at TEXT NOT NULL,
+            duration_ms INTEGER NOT NULL DEFAULT 0,
+            error_text TEXT
+        )",
     ] {
         sqlx::query(statement).execute(db).await?;
     }
@@ -206,6 +223,9 @@ pub(crate) async fn init_db(db: &SqlitePool) -> Result<()> {
     ensure_column(db, "agent_versions", "registry_key", "TEXT").await?;
     ensure_column(db, "agent_versions", "active", "INTEGER NOT NULL DEFAULT 1").await?;
     ensure_column(db, "agent_versions", "documentation", "TEXT").await?;
+    ensure_column(db, "request_journal", "client_route", "TEXT").await?;
+    ensure_column(db, "request_journal", "client_ts", "TEXT").await?;
+    ensure_column(db, "request_journal", "duration_ms", "INTEGER NOT NULL DEFAULT 0").await?;
     ensure_column(db, "benchmark_pools", "registry_key", "TEXT").await?;
     ensure_column(db, "opening_suites", "registry_key", "TEXT").await?;
     ensure_column(db, "event_presets", "registry_key", "TEXT").await?;
@@ -219,6 +239,8 @@ pub(crate) async fn init_db(db: &SqlitePool) -> Result<()> {
     ] {
         sqlx::query(statement).execute(db).await?;
     }
+    sanitize_game_logs(db, "games").await?;
+    sanitize_game_logs(db, "human_games").await?;
     Ok(())
 }
 
@@ -250,6 +272,51 @@ async fn ensure_column(db: &SqlitePool, table: &str, column: &str, definition: &
         ))
         .execute(db)
         .await?;
+    }
+    Ok(())
+}
+
+async fn sanitize_game_logs(db: &SqlitePool, table: &str) -> Result<()> {
+    let rows = sqlx::query(&format!("SELECT id, logs FROM {table}"))
+        .fetch_all(db)
+        .await?;
+    for row in rows {
+        let id: String = row.get("id");
+        let logs: String = row.get("logs");
+        let Ok(value) = serde_json::from_str::<Value>(&logs) else {
+            sqlx::query(&format!("UPDATE {table} SET logs = ? WHERE id = ?"))
+                .bind("[]")
+                .bind(&id)
+                .execute(db)
+                .await?;
+            continue;
+        };
+        let Some(entries) = value.as_array() else {
+            sqlx::query(&format!("UPDATE {table} SET logs = ? WHERE id = ?"))
+                .bind("[]")
+                .bind(&id)
+                .execute(db)
+                .await?;
+            continue;
+        };
+        let sanitized: Vec<Value> = entries
+            .iter()
+            .filter(|entry| {
+                entry
+                    .get("event")
+                    .and_then(Value::as_str)
+                    .map(|event| !event.is_empty())
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+        if sanitized.len() != entries.len() {
+            sqlx::query(&format!("UPDATE {table} SET logs = ? WHERE id = ?"))
+                .bind(serde_json::to_string(&sanitized)?)
+                .bind(&id)
+                .execute(db)
+                .await?;
+        }
     }
     Ok(())
 }

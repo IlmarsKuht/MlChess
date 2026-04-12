@@ -234,22 +234,31 @@ export interface LiveIntentAck {
   message_type: "intent_ack";
   match_id: string;
   intent_id: string;
+  client_action_id?: string;
+  ws_connection_id?: string;
+  request_id?: string;
   ack: "accepted" | "duplicate";
 }
 
 export interface LiveErrorMessage {
   message_type: "error";
   error: string;
+  request_id?: string;
+  client_action_id?: string;
+  ws_connection_id?: string;
 }
 
 export interface LiveSubscribeMessage {
   message_type: "subscribe";
   last_seq?: number;
+  ws_connection_id?: string;
 }
 
 export interface LiveSubmitMoveMessage {
   message_type: "submit_move";
   intent_id?: string;
+  client_action_id?: string;
+  ws_connection_id?: string;
   move_uci: string;
 }
 

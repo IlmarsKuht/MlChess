@@ -13,13 +13,12 @@ use arena_core::{
 use async_trait::async_trait;
 use chrono::Utc;
 use cozy_chess::{Board, Color, GameStatus, util};
-use uuid::Uuid;
 use tokio::time::timeout;
+use uuid::Uuid;
 
 use crate::{
     calculate_move_budget, classify_position, classify_terminal_board, pgn_from_moves,
-    starting_board,
-    uci::UciAgentAdapter,
+    starting_board, uci::UciAgentAdapter,
 };
 
 #[derive(Clone)]
@@ -377,12 +376,10 @@ fn side_from_fen(fen: &str) -> LiveSide {
 }
 
 fn finalize_logs(mut logs: Vec<GameLogEntry>, total_elapsed_ms: u64) -> Vec<GameLogEntry> {
-    logs.push(GameLogEntry {
-        timestamp_ms: total_elapsed_ms,
-        level: "info".to_string(),
-        source: "runner".to_string(),
-        message: "game finished".to_string(),
-    });
+    logs.push(
+        GameLogEntry::new("runner.game_finished", "info", "runner", "game finished")
+            .with_timestamp_ms(total_elapsed_ms),
+    );
     logs
 }
 

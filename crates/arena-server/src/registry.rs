@@ -10,16 +10,13 @@ use anyhow::{Context, Result};
 use sqlx::SqlitePool;
 use tokio::sync::Mutex;
 
-use crate::registry_loader::{
-    collect_registry_files, load_registry_snapshot,
-};
+use crate::registry_loader::{collect_registry_files, load_registry_snapshot};
 use crate::registry_sync::sync_snapshot;
 
 #[derive(Clone, Default)]
 pub(crate) struct SetupRegistryCache {
     digest: Arc<Mutex<Option<u64>>>,
 }
-
 
 pub(crate) async fn sync_setup_registry_if_changed(
     db: &SqlitePool,
@@ -63,12 +60,14 @@ fn compute_registry_digest(workspace_root: &Path) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::{
+        list_agent_versions, list_agents, list_event_presets, list_opening_suites, list_pools,
+    };
     use arena_core::{FairnessConfig, Variant};
     use chrono::Utc;
-    use std::path::PathBuf;
     use sqlx::sqlite::SqlitePoolOptions;
+    use std::path::PathBuf;
     use uuid::Uuid;
-    use crate::storage::{list_agent_versions, list_agents, list_event_presets, list_opening_suites, list_pools};
 
     #[tokio::test]
     async fn syncs_rust_and_command_engines_from_registry() {
@@ -244,17 +243,19 @@ MODEL_PATH = "models/latest.pt"
 
         let agents = list_agents(&db).await.unwrap();
         let versions = list_agent_versions(&db, None).await.unwrap();
-        assert!(agents
-            .iter()
-            .any(|agent| agent.registry_key.as_deref() == Some("material-plus")));
-        assert!(!versions
-            .iter()
-            .any(|version| version.registry_key.as_deref() == Some("material-plus/v1")));
         assert!(
-            versions.iter().any(|version| {
-                version.registry_key.as_deref() == Some("material-plus/dev") && version.active
-            })
+            agents
+                .iter()
+                .any(|agent| agent.registry_key.as_deref() == Some("material-plus"))
         );
+        assert!(
+            !versions
+                .iter()
+                .any(|version| version.registry_key.as_deref() == Some("material-plus/v1"))
+        );
+        assert!(versions.iter().any(|version| {
+            version.registry_key.as_deref() == Some("material-plus/dev") && version.active
+        }));
         assert!(list_pools(&db).await.unwrap().is_empty());
     }
 

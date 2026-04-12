@@ -96,7 +96,11 @@ impl StabilityTracker {
         }
     }
 
-    pub fn observe_pair(&mut self, pair: &MatchPair, ratings: &HashMap<EngineId, LeaderboardEntry>) {
+    pub fn observe_pair(
+        &mut self,
+        pair: &MatchPair,
+        ratings: &HashMap<EngineId, LeaderboardEntry>,
+    ) {
         *self.pair_counts.entry(pair.engine_a).or_insert(0) += 1;
         *self.pair_counts.entry(pair.engine_b).or_insert(0) += 1;
         self.total_pairs += 1;
@@ -115,7 +119,10 @@ impl StabilityTracker {
     }
 
     pub fn pair_count_for(&self, engine_id: EngineId) -> u32 {
-        self.pair_counts.get(&engine_id).copied().unwrap_or_default()
+        self.pair_counts
+            .get(&engine_id)
+            .copied()
+            .unwrap_or_default()
     }
 
     pub fn should_stop(&self, participants: &[EngineId]) -> Option<StopReason> {

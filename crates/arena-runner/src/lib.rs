@@ -8,6 +8,5 @@ pub use game_logic::{
 };
 pub use match_runner::{
     AgentAdapter, MatchBundleRequest, MatchPairRequest, MatchRequest, build_adapter,
-    play_match_bundle, play_match_pair,
-    play_single_game,
+    play_match_bundle, play_match_pair, play_single_game,
 };

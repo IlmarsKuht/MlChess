@@ -11,15 +11,13 @@ use anyhow::Result;
 use arena_core::{GameResult, MatchSeries, MatchStatus, TimeControl, TournamentStatus, Variant};
 use arena_runner::AgentAdapter;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tracing::error;
 use uuid::Uuid;
 
 use crate::{
-    ApiError,
-    live::LiveMatchStore,
-    orchestration::run_tournament,
-    registry::SetupRegistryCache,
+    ApiError, live::LiveMatchStore, orchestration::run_tournament, registry::SetupRegistryCache,
     storage::update_tournament_status,
 };
 
@@ -30,6 +28,7 @@ pub struct AppState {
     pub(crate) live_matches: LiveMatchStore,
     pub(crate) live_metrics: LiveMetricsStore,
     pub(crate) human_games: HumanGameStore,
+    pub(crate) debug_reports_dir: PathBuf,
     pub(crate) frontend_dist: Option<PathBuf>,
     pub(crate) setup_registry: SetupRegistryCache,
 }
@@ -67,6 +66,8 @@ pub(crate) struct HumanGameSession {
 pub(crate) enum HumanGameCommand {
     SubmitMove {
         intent_id: Uuid,
+        client_action_id: Option<Uuid>,
+        ws_connection_id: Option<Uuid>,
         move_uci: String,
         respond_to: tokio::sync::oneshot::Sender<HumanMoveAck>,
     },
@@ -111,8 +112,49 @@ pub(crate) struct HumanPlayer {
     pub(crate) created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct RequestContext {
+    pub(crate) request_id: Uuid,
+    pub(crate) client_action_id: Option<Uuid>,
+    pub(crate) client_route: Option<String>,
+    pub(crate) client_ts: Option<String>,
+    pub(crate) method: String,
+    pub(crate) route: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct MoveDebugContext {
+    pub(crate) request_id: Option<Uuid>,
+    pub(crate) client_action_id: Option<Uuid>,
+    pub(crate) ws_connection_id: Option<Uuid>,
+    pub(crate) intent_id: Uuid,
+    pub(crate) move_uci: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct RequestJournalEntry {
+    pub(crate) request_id: Uuid,
+    pub(crate) client_action_id: Option<Uuid>,
+    pub(crate) client_route: Option<String>,
+    pub(crate) client_ts: Option<String>,
+    pub(crate) method: String,
+    pub(crate) route: String,
+    pub(crate) status_code: u16,
+    pub(crate) match_id: Option<Uuid>,
+    pub(crate) tournament_id: Option<Uuid>,
+    pub(crate) game_id: Option<Uuid>,
+    pub(crate) started_at: DateTime<Utc>,
+    pub(crate) completed_at: DateTime<Utc>,
+    pub(crate) duration_ms: i64,
+    pub(crate) error_text: Option<String>,
+}
+
 impl TournamentCoordinator {
-    pub(crate) async fn start(&self, state: AppState, tournament_id: Uuid) -> Result<bool, ApiError> {
+    pub(crate) async fn start(
+        &self,
+        state: AppState,
+        tournament_id: Uuid,
+    ) -> Result<bool, ApiError> {
         let mut running = self.running.lock().await;
         if running.contains_key(&tournament_id) {
             return Ok(false);

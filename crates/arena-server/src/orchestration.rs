@@ -9,16 +9,17 @@ use std::{
 
 use anyhow::{Result, anyhow, bail};
 use arena_core::{
-    AgentVersion, EventPreset, EventPresetSelectionMode, GameRecord, GameResult, LeaderboardEntry,
-    LiveRuntimeCheckpoint, MatchSeries, MatchStatus, RoundRobinScheduler, ScheduledPair,
-    StabilityConfig, StabilityTracker, Tournament, TournamentKind, TournamentStatus, Variant,
-    snapshot_from_entry,
+    AgentVersion, EventPreset, EventPresetSelectionMode, GameLogEntry, GameRecord, GameResult,
+    LeaderboardEntry, LiveRuntimeCheckpoint, MatchSeries, MatchStatus, RoundRobinScheduler,
+    ScheduledPair, StabilityConfig, StabilityTracker, Tournament, TournamentKind, TournamentStatus,
+    Variant, snapshot_from_entry,
 };
 use arena_runner::{
     AgentAdapter, build_adapter, calculate_move_budget, classify_position, classify_terminal_board,
     pgn_from_moves,
 };
 use chrono::Utc;
+use serde_json::json;
 use sqlx::SqlitePool;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -34,15 +35,58 @@ use crate::{
     },
     presentation::HumanPlayerProfile,
     rating::build_pair_rating_update,
-    state::{AppState, HumanGameCommand, HumanGameRuntime, HumanGameSession, HumanMoveAck, HumanPlayer},
+    state::{
+        AppState, HumanGameCommand, HumanGameRuntime, HumanGameSession, HumanMoveAck, HumanPlayer,
+        MoveDebugContext,
+    },
     storage::{
-        ensure_agent_version_exists, ensure_human_player, ensure_leaderboard_seed, ensure_pool_exists,
-        get_agent_version, get_match_series, get_pool, get_tournament, insert_game, insert_human_game,
-        insert_human_rating_snapshot, insert_match_series, insert_rating_snapshot, insert_tournament,
-        list_agent_versions, list_agent_versions_by_ids, load_human_profile, load_pool_leaderboard,
-        load_pool_openings, update_match_series_status, update_tournament_status,
+        ensure_agent_version_exists, ensure_human_player, ensure_leaderboard_seed,
+        ensure_pool_exists, get_agent_version, get_match_series, get_pool, get_tournament,
+        insert_game, insert_human_game, insert_human_rating_snapshot, insert_match_series,
+        insert_rating_snapshot, insert_tournament, list_agent_versions, list_agent_versions_by_ids,
+        load_human_profile, load_pool_leaderboard, load_pool_openings, update_match_series_status,
+        update_tournament_status,
     },
 };
+
+fn push_runtime_log(logs: &mut Vec<GameLogEntry>, entry: GameLogEntry) {
+    logs.push(entry);
+}
+
+fn runtime_log(
+    runtime: &HumanGameRuntime,
+    source: &str,
+    event: &str,
+    message: impl Into<String>,
+) -> GameLogEntry {
+    GameLogEntry::new(event, "info", source, message.into())
+        .with_tournament_id(runtime.tournament_id)
+        .with_seq(runtime.seq)
+        .with_clocks(runtime.white_time_left_ms, runtime.black_time_left_ms)
+}
+
+fn human_runtime_log(
+    session: &HumanGameSession,
+    runtime: &HumanGameRuntime,
+    event: &str,
+    message: impl Into<String>,
+) -> GameLogEntry {
+    runtime_log(runtime, "server.human_runtime", event, message)
+        .with_match_id(session.match_series.id)
+}
+
+fn engine_runtime_log(
+    session: &EngineMatchSession,
+    runtime: &EngineMatchRuntime,
+    event: &str,
+    message: impl Into<String>,
+) -> GameLogEntry {
+    GameLogEntry::new(event, "info", "server.engine_runtime", message.into())
+        .with_match_id(session.match_series.id)
+        .with_tournament_id(runtime.tournament_id)
+        .with_seq(runtime.seq)
+        .with_clocks(runtime.white_time_left_ms, runtime.black_time_left_ms)
+}
 
 pub(crate) async fn create_human_game(
     state: &AppState,
@@ -107,7 +151,7 @@ pub(crate) async fn create_human_game(
     engine.prepare(pool.variant, &mut logs).await?;
     engine.begin_game(&mut logs).await?;
     let initial_hash = board.hash_without_ep();
-    let runtime = HumanGameRuntime {
+    let mut runtime = HumanGameRuntime {
         tournament_id,
         variant: pool.variant,
         time_control: pool.time_control.clone(),
@@ -141,6 +185,18 @@ pub(crate) async fn create_human_game(
         human_player,
         command_tx,
     };
+    let created_log = human_runtime_log(
+        &session,
+        &runtime,
+        "human_game.created",
+        "human game created",
+    )
+    .with_fields(json!({
+        "human_player_id": session.human_player.id,
+        "white_version_id": session.match_series.white_version_id,
+        "black_version_id": session.match_series.black_version_id,
+    }));
+    push_runtime_log(&mut runtime.logs, created_log);
     state.human_games.insert(session.clone()).await;
     tokio::spawn(run_human_game_owner(
         state.clone(),
@@ -163,8 +219,7 @@ pub(crate) async fn load_human_player_profile(
 pub(crate) async fn submit_human_move(
     state: AppState,
     match_id: Uuid,
-    intent_id: Uuid,
-    uci: String,
+    move_context: MoveDebugContext,
 ) -> Result<&'static str, ApiError> {
     let session = state
         .human_games
@@ -175,8 +230,10 @@ pub(crate) async fn submit_human_move(
     session
         .command_tx
         .send(HumanGameCommand::SubmitMove {
-            intent_id,
-            move_uci: uci,
+            intent_id: move_context.intent_id,
+            client_action_id: move_context.client_action_id,
+            ws_connection_id: move_context.ws_connection_id,
+            move_uci: move_context.move_uci.clone(),
             respond_to,
         })
         .await
@@ -223,7 +280,8 @@ pub(crate) async fn restore_human_game(
     for uci in &checkpoint.moves {
         let mv = cozy_chess::util::parse_uci_move(&board, uci)
             .map_err(|err| ApiError::Conflict(format!("failed to restore move {uci}: {err}")))?;
-        board.try_play(mv)
+        board
+            .try_play(mv)
             .map_err(|_| ApiError::Conflict(format!("failed to replay restored move {uci}")))?;
         *repetitions.entry(board.hash_without_ep()).or_insert(0) += 1;
     }
@@ -265,15 +323,27 @@ pub(crate) async fn restore_human_game(
         termination: match checkpoint.termination {
             arena_core::LiveTermination::Checkmate => Some(arena_core::GameTermination::Checkmate),
             arena_core::LiveTermination::Timeout => Some(arena_core::GameTermination::Timeout),
-            arena_core::LiveTermination::Resignation => Some(arena_core::GameTermination::Resignation),
+            arena_core::LiveTermination::Resignation => {
+                Some(arena_core::GameTermination::Resignation)
+            }
             arena_core::LiveTermination::Abort => Some(arena_core::GameTermination::Unknown),
             arena_core::LiveTermination::Stalemate => Some(arena_core::GameTermination::Stalemate),
-            arena_core::LiveTermination::Repetition => Some(arena_core::GameTermination::Repetition),
-            arena_core::LiveTermination::InsufficientMaterial => Some(arena_core::GameTermination::InsufficientMaterial),
-            arena_core::LiveTermination::FiftyMoveRule => Some(arena_core::GameTermination::FiftyMoveRule),
-            arena_core::LiveTermination::IllegalMove => Some(arena_core::GameTermination::IllegalMove),
+            arena_core::LiveTermination::Repetition => {
+                Some(arena_core::GameTermination::Repetition)
+            }
+            arena_core::LiveTermination::InsufficientMaterial => {
+                Some(arena_core::GameTermination::InsufficientMaterial)
+            }
+            arena_core::LiveTermination::FiftyMoveRule => {
+                Some(arena_core::GameTermination::FiftyMoveRule)
+            }
+            arena_core::LiveTermination::IllegalMove => {
+                Some(arena_core::GameTermination::IllegalMove)
+            }
             arena_core::LiveTermination::MoveLimit => Some(arena_core::GameTermination::MoveLimit),
-            arena_core::LiveTermination::EngineFailure => Some(arena_core::GameTermination::EngineFailure),
+            arena_core::LiveTermination::EngineFailure => {
+                Some(arena_core::GameTermination::EngineFailure)
+            }
             arena_core::LiveTermination::None => None,
         },
         status: match checkpoint.status {
@@ -326,7 +396,9 @@ async fn run_human_game_owner(
         }
         let sleep = tokio::time::sleep(std::time::Duration::from_millis(timeout_delay));
         tokio::pin!(sleep);
-        let sync = tokio::time::sleep(std::time::Duration::from_millis(CLOCK_SYNC_INTERVAL_MS.min(timeout_delay)));
+        let sync = tokio::time::sleep(std::time::Duration::from_millis(
+            CLOCK_SYNC_INTERVAL_MS.min(timeout_delay),
+        ));
         tokio::pin!(sync);
         let mut timed_out = false;
         let command_opt = loop {
@@ -359,10 +431,24 @@ async fn run_human_game_owner(
         match command {
             HumanGameCommand::SubmitMove {
                 intent_id,
+                client_action_id,
+                ws_connection_id,
                 move_uci,
                 respond_to,
             } => {
-                let ack = process_human_move(&state, &session, &mut runtime, intent_id, move_uci).await;
+                let ack = process_human_move(
+                    &state,
+                    &session,
+                    &mut runtime,
+                    MoveDebugContext {
+                        request_id: None,
+                        client_action_id,
+                        ws_connection_id,
+                        intent_id,
+                        move_uci,
+                    },
+                )
+                .await;
                 let _ = respond_to.send(ack);
             }
         }
@@ -489,9 +575,10 @@ pub(crate) async fn run_tournament(
 
 fn build_scheduler(tournament: &Tournament) -> RoundRobinScheduler {
     match tournament.kind {
-        TournamentKind::RoundRobin => {
-            RoundRobinScheduler::new(&tournament.participant_version_ids, tournament.games_per_pairing)
-        }
+        TournamentKind::RoundRobin => RoundRobinScheduler::new(
+            &tournament.participant_version_ids,
+            tournament.games_per_pairing,
+        ),
         TournamentKind::Ladder => RoundRobinScheduler::from_pairings(
             tournament
                 .participant_version_ids
@@ -559,6 +646,12 @@ pub(crate) async fn create_tournament_run(
     insert_tournament(db, &tournament)
         .await
         .map_err(ApiError::Internal)?;
+    info!(
+        tournament_id = %tournament.id,
+        pool_id = %tournament.pool_id,
+        participant_count = tournament.participant_version_ids.len(),
+        "tournament created"
+    );
     Ok(tournament)
 }
 
@@ -571,8 +664,12 @@ async fn finalize_human_game(
     let mut shutdown_logs = std::mem::take(&mut runtime.logs);
     runtime.engine.shutdown(&mut shutdown_logs).await.ok();
     runtime.logs = shutdown_logs;
+    let final_log = human_runtime_log(&session, &runtime, "game.finalized", "human game finalized");
+    push_runtime_log(&mut runtime.logs, final_log);
     let result = runtime.result.unwrap_or(GameResult::Draw);
-    let termination = runtime.termination.unwrap_or(arena_core::GameTermination::Unknown);
+    let termination = runtime
+        .termination
+        .unwrap_or(arena_core::GameTermination::Unknown);
     let game = GameRecord {
         id: Uuid::new_v4(),
         tournament_id: runtime.tournament_id,
@@ -662,11 +759,13 @@ async fn apply_human_pool_rating_update(
     let update = build_pair_rating_update(&entries, &pair);
 
     if game.white_version_id == human_player.id {
-        insert_human_rating_snapshot(db, &snapshot_from_entry(Some(pool_id), &update.engine_a)).await?;
+        insert_human_rating_snapshot(db, &snapshot_from_entry(Some(pool_id), &update.engine_a))
+            .await?;
         insert_rating_snapshot(db, &snapshot_from_entry(Some(pool_id), &update.engine_b)).await?;
     } else {
         insert_rating_snapshot(db, &snapshot_from_entry(Some(pool_id), &update.engine_a)).await?;
-        insert_human_rating_snapshot(db, &snapshot_from_entry(Some(pool_id), &update.engine_b)).await?;
+        insert_human_rating_snapshot(db, &snapshot_from_entry(Some(pool_id), &update.engine_b))
+            .await?;
     }
     Ok(())
 }
@@ -852,7 +951,8 @@ async fn play_server_owned_engine_game(
     }
 
     while runtime.status == MatchStatus::Running {
-        if let Some((result, termination)) = classify_position(&runtime.board, &runtime.repetitions) {
+        if let Some((result, termination)) = classify_position(&runtime.board, &runtime.repetitions)
+        {
             runtime.result = Some(result);
             runtime.termination = Some(termination);
             runtime.status = MatchStatus::Completed;
@@ -874,7 +974,9 @@ async fn play_server_owned_engine_game(
         let mut logs = std::mem::take(&mut runtime.logs);
         let timeout = tokio::time::sleep(std::time::Duration::from_millis(remaining.max(1)));
         tokio::pin!(timeout);
-        let sync = tokio::time::sleep(std::time::Duration::from_millis(CLOCK_SYNC_INTERVAL_MS.min(remaining.max(1))));
+        let sync = tokio::time::sleep(std::time::Duration::from_millis(
+            CLOCK_SYNC_INTERVAL_MS.min(remaining.max(1)),
+        ));
         tokio::pin!(sync);
         let sync_match_id = session.match_series.id;
         let sync_fen = runtime.current_fen.clone();
@@ -983,7 +1085,10 @@ async fn play_server_owned_engine_game(
                 }
                 runtime.termination = Some(arena_core::GameTermination::Timeout);
                 runtime.status = MatchStatus::Completed;
-                state.live_metrics.timeout_fires.fetch_add(1, Ordering::Relaxed);
+                state
+                    .live_metrics
+                    .timeout_fires
+                    .fetch_add(1, Ordering::Relaxed);
                 break;
             }
             Ok(Err(_)) => {
@@ -1005,8 +1110,9 @@ async fn play_server_owned_engine_game(
             break;
         }
 
-        let mv = cozy_chess::util::parse_uci_move(&runtime.board, &selected)
-            .map_err(|err| ApiError::Conflict(format!("engine returned invalid UCI move: {err}")))?;
+        let mv = cozy_chess::util::parse_uci_move(&runtime.board, &selected).map_err(|err| {
+            ApiError::Conflict(format!("engine returned invalid UCI move: {err}"))
+        })?;
         if runtime.board.try_play(mv).is_err() {
             runtime.result = Some(if side == cozy_chess::Color::White {
                 GameResult::BlackWin
@@ -1020,7 +1126,10 @@ async fn play_server_owned_engine_game(
 
         runtime.move_history.push(selected);
         runtime.current_fen = runtime.board.to_string();
-        *runtime.repetitions.entry(runtime.board.hash_without_ep()).or_insert(0) += 1;
+        *runtime
+            .repetitions
+            .entry(runtime.board.hash_without_ep())
+            .or_insert(0) += 1;
         if side == cozy_chess::Color::White {
             runtime.white_time_left_ms = runtime
                 .white_time_left_ms
@@ -1031,7 +1140,8 @@ async fn play_server_owned_engine_game(
                 .saturating_add(runtime.time_control.increment_ms);
         }
         runtime.turn_started_server_unix_ms = Utc::now().timestamp_millis();
-        if let Some((result, termination)) = classify_position(&runtime.board, &runtime.repetitions) {
+        if let Some((result, termination)) = classify_position(&runtime.board, &runtime.repetitions)
+        {
             runtime.result = Some(result);
             runtime.termination = Some(termination);
             runtime.status = MatchStatus::Completed;
@@ -1071,7 +1181,8 @@ pub(crate) async fn restore_engine_game(
     for uci in &checkpoint.moves {
         let mv = cozy_chess::util::parse_uci_move(&board, uci)
             .map_err(|err| ApiError::Conflict(format!("failed to restore move {uci}: {err}")))?;
-        board.try_play(mv)
+        board
+            .try_play(mv)
             .map_err(|_| ApiError::Conflict(format!("failed to replay restored move {uci}")))?;
         *repetitions.entry(board.hash_without_ep()).or_insert(0) += 1;
     }
@@ -1123,6 +1234,20 @@ async fn publish_engine_runtime(
 ) -> Result<(), ApiError> {
     runtime.seq += 1;
     let checkpoint = engine_checkpoint(session, runtime);
+    let event_name = if initial {
+        "live.snapshot"
+    } else if runtime.status == MatchStatus::Running {
+        "live.move_published"
+    } else {
+        "game.finalized"
+    };
+    let runtime_log_entry = engine_runtime_log(
+        session,
+        runtime,
+        event_name,
+        format!("engine runtime event {}", runtime.seq),
+    );
+    push_runtime_log(&mut runtime.logs, runtime_log_entry);
     let event = if initial {
         arena_core::LiveEventEnvelope::Snapshot(snapshot_from_checkpoint(&checkpoint))
     } else if runtime.status == MatchStatus::Running {
@@ -1140,13 +1265,19 @@ async fn publish_engine_runtime(
     .await
 }
 
-fn engine_checkpoint(session: &EngineMatchSession, runtime: &EngineMatchRuntime) -> LiveRuntimeCheckpoint {
+fn engine_checkpoint(
+    session: &EngineMatchSession,
+    runtime: &EngineMatchRuntime,
+) -> LiveRuntimeCheckpoint {
     let updated_at = Utc::now();
     LiveRuntimeCheckpoint {
         match_id: session.match_series.id,
         seq: runtime.seq,
         status: live_status_from_match_status(runtime.status),
-        result: runtime.result.map(live_result_from_game_result).unwrap_or(arena_core::LiveResult::None),
+        result: runtime
+            .result
+            .map(live_result_from_game_result)
+            .unwrap_or(arena_core::LiveResult::None),
         termination: runtime
             .termination
             .map(live_termination_from_game_termination)
@@ -1172,8 +1303,17 @@ async fn finalize_engine_game(
 ) -> Result<GameRecord, ApiError> {
     runtime.white_engine.shutdown(&mut runtime.logs).await.ok();
     runtime.black_engine.shutdown(&mut runtime.logs).await.ok();
+    let final_log = engine_runtime_log(
+        &session,
+        &runtime,
+        "game.finalized",
+        "engine game finalized",
+    );
+    push_runtime_log(&mut runtime.logs, final_log);
     let result = runtime.result.unwrap_or(GameResult::Draw);
-    let termination = runtime.termination.unwrap_or(arena_core::GameTermination::Unknown);
+    let termination = runtime
+        .termination
+        .unwrap_or(arena_core::GameTermination::Unknown);
     let game = GameRecord {
         id: Uuid::new_v4(),
         tournament_id: runtime.tournament_id,
@@ -1294,6 +1434,13 @@ async fn emit_human_clock_sync(
     runtime.turn_started_server_unix_ms = Utc::now().timestamp_millis();
     runtime.seq += 1;
     let checkpoint = human_checkpoint(session, runtime);
+    let clock_log = human_runtime_log(
+        session,
+        runtime,
+        "clock.sync_emitted",
+        "human clock sync emitted",
+    );
+    push_runtime_log(&mut runtime.logs, clock_log);
     publish_transient_with_metrics(
         &state.live_matches,
         Some(&state.live_metrics),
@@ -1312,11 +1459,13 @@ async fn finalize_human_timeout(
     if runtime.status != MatchStatus::Running {
         return Ok(());
     }
-    runtime.result = Some(if runtime.board.side_to_move() == cozy_chess::Color::White {
-        GameResult::BlackWin
-    } else {
-        GameResult::WhiteWin
-    });
+    runtime.result = Some(
+        if runtime.board.side_to_move() == cozy_chess::Color::White {
+            GameResult::BlackWin
+        } else {
+            GameResult::WhiteWin
+        },
+    );
     runtime.termination = Some(arena_core::GameTermination::Timeout);
     runtime.status = MatchStatus::Completed;
     if runtime.board.side_to_move() == cozy_chess::Color::White {
@@ -1324,6 +1473,8 @@ async fn finalize_human_timeout(
     } else {
         runtime.black_time_left_ms = 0;
     }
+    let timeout_log = human_runtime_log(session, runtime, "timeout.fired", "human timeout fired");
+    push_runtime_log(&mut runtime.logs, timeout_log);
     publish_human_runtime(state, session, runtime, false).await
 }
 
@@ -1335,6 +1486,20 @@ async fn publish_human_runtime(
 ) -> Result<(), ApiError> {
     runtime.seq += 1;
     let checkpoint = human_checkpoint(session, runtime);
+    let event_name = if initial {
+        "live.snapshot"
+    } else if runtime.status == MatchStatus::Running {
+        "live.move_published"
+    } else {
+        "game.finalized"
+    };
+    let runtime_log_entry = human_runtime_log(
+        session,
+        runtime,
+        event_name,
+        format!("human runtime event {}", runtime.seq),
+    );
+    push_runtime_log(&mut runtime.logs, runtime_log_entry);
     let event = if initial {
         arena_core::LiveEventEnvelope::Snapshot(snapshot_from_checkpoint(&checkpoint))
     } else if runtime.status == MatchStatus::Running {
@@ -1352,13 +1517,19 @@ async fn publish_human_runtime(
     .await
 }
 
-fn human_checkpoint(session: &HumanGameSession, runtime: &HumanGameRuntime) -> LiveRuntimeCheckpoint {
+fn human_checkpoint(
+    session: &HumanGameSession,
+    runtime: &HumanGameRuntime,
+) -> LiveRuntimeCheckpoint {
     let updated_at = Utc::now();
     LiveRuntimeCheckpoint {
         match_id: session.match_series.id,
         seq: runtime.seq,
         status: live_status_from_match_status(runtime.status),
-        result: runtime.result.map(live_result_from_game_result).unwrap_or(arena_core::LiveResult::None),
+        result: runtime
+            .result
+            .map(live_result_from_game_result)
+            .unwrap_or(arena_core::LiveResult::None),
         termination: runtime
             .termination
             .map(live_termination_from_game_termination)
@@ -1381,14 +1552,40 @@ async fn process_human_move(
     state: &AppState,
     session: &HumanGameSession,
     runtime: &mut HumanGameRuntime,
-    intent_id: Uuid,
-    move_uci: String,
+    move_context: MoveDebugContext,
 ) -> HumanMoveAck {
+    let intent_id = move_context.intent_id;
+    let move_uci = move_context.move_uci.clone();
+    let submitted_log = human_runtime_log(
+        session,
+        runtime,
+        "move.submitted",
+        format!("human submitted {move_uci}"),
+    )
+    .with_move_uci(move_uci.clone())
+    .with_fields(json!({
+        "intent_id": intent_id,
+        "client_action_id": move_context.client_action_id,
+        "ws_connection_id": move_context.ws_connection_id,
+        "request_id": move_context.request_id,
+    }));
+    push_runtime_log(&mut runtime.logs, submitted_log);
     if let Some(previous) = runtime.seen_intents.get(&intent_id).copied() {
         return previous;
     }
     if runtime.status != MatchStatus::Running {
-        runtime.seen_intents.insert(intent_id, HumanMoveAck::RejectedGameFinished);
+        let rejected_log = human_runtime_log(
+            session,
+            runtime,
+            "move.rejected_finished",
+            "human move rejected because game is finished",
+        )
+        .with_move_uci(move_uci)
+        .with_fields(json!({ "intent_id": intent_id }));
+        push_runtime_log(&mut runtime.logs, rejected_log);
+        runtime
+            .seen_intents
+            .insert(intent_id, HumanMoveAck::RejectedGameFinished);
         return HumanMoveAck::RejectedGameFinished;
     }
     let human_side = if session.match_series.white_version_id == session.human_player.id {
@@ -1397,7 +1594,18 @@ async fn process_human_move(
         cozy_chess::Color::Black
     };
     if runtime.board.side_to_move() != human_side {
-        runtime.seen_intents.insert(intent_id, HumanMoveAck::RejectedNotYourTurn);
+        let rejected_log = human_runtime_log(
+            session,
+            runtime,
+            "move.rejected_wrong_turn",
+            "human move rejected because it is not the human turn",
+        )
+        .with_move_uci(move_uci)
+        .with_fields(json!({ "intent_id": intent_id }));
+        push_runtime_log(&mut runtime.logs, rejected_log);
+        runtime
+            .seen_intents
+            .insert(intent_id, HumanMoveAck::RejectedNotYourTurn);
         return HumanMoveAck::RejectedNotYourTurn;
     }
     if runtime.move_history.len() as u16 >= runtime.max_plies {
@@ -1405,7 +1613,9 @@ async fn process_human_move(
         runtime.termination = Some(arena_core::GameTermination::MoveLimit);
         runtime.status = MatchStatus::Completed;
         let _ = publish_human_runtime(state, session, runtime, false).await;
-        runtime.seen_intents.insert(intent_id, HumanMoveAck::RejectedGameFinished);
+        runtime
+            .seen_intents
+            .insert(intent_id, HumanMoveAck::RejectedGameFinished);
         return HumanMoveAck::RejectedGameFinished;
     }
     let handled_at = Utc::now();
@@ -1427,19 +1637,51 @@ async fn process_human_move(
         runtime.termination = Some(arena_core::GameTermination::Timeout);
         runtime.status = MatchStatus::Completed;
         *clock = 0;
+        let timeout_log = human_runtime_log(
+            session,
+            runtime,
+            "timeout.fired",
+            "human move arrived after remaining clock expired",
+        )
+        .with_fields(json!({ "intent_id": intent_id }));
+        push_runtime_log(&mut runtime.logs, timeout_log);
         let _ = publish_human_runtime(state, session, runtime, false).await;
-        runtime.seen_intents.insert(intent_id, HumanMoveAck::RejectedGameFinished);
+        runtime
+            .seen_intents
+            .insert(intent_id, HumanMoveAck::RejectedGameFinished);
         return HumanMoveAck::RejectedGameFinished;
     }
     let Ok(mv) = cozy_chess::util::parse_uci_move(&runtime.board, &move_uci) else {
-        runtime.seen_intents.insert(intent_id, HumanMoveAck::RejectedIllegal);
+        let rejected_log = human_runtime_log(
+            session,
+            runtime,
+            "move.rejected_illegal",
+            "human move rejected because UCI parsing failed",
+        )
+        .with_move_uci(move_uci)
+        .with_fields(json!({ "intent_id": intent_id }));
+        push_runtime_log(&mut runtime.logs, rejected_log);
+        runtime
+            .seen_intents
+            .insert(intent_id, HumanMoveAck::RejectedIllegal);
         return HumanMoveAck::RejectedIllegal;
     };
     if runtime.board.try_play(mv).is_err() {
-        runtime.seen_intents.insert(intent_id, HumanMoveAck::RejectedIllegal);
+        let rejected_log = human_runtime_log(
+            session,
+            runtime,
+            "move.rejected_illegal",
+            "human move rejected because it is illegal in the current position",
+        )
+        .with_move_uci(move_uci)
+        .with_fields(json!({ "intent_id": intent_id }));
+        push_runtime_log(&mut runtime.logs, rejected_log);
+        runtime
+            .seen_intents
+            .insert(intent_id, HumanMoveAck::RejectedIllegal);
         return HumanMoveAck::RejectedIllegal;
     }
-    runtime.move_history.push(move_uci);
+    runtime.move_history.push(move_uci.clone());
     runtime.current_fen = format!("{}", runtime.board);
     let board_hash = runtime.board.hash_without_ep();
     *runtime.repetitions.entry(board_hash).or_insert(0) += 1;
@@ -1449,6 +1691,14 @@ async fn process_human_move(
         runtime.black_time_left_ms = runtime.black_time_left_ms.saturating_add(increment_ms);
     }
     runtime.turn_started_server_unix_ms = handled_at.timestamp_millis();
+    let accepted_log = human_runtime_log(session, runtime, "move.accepted", "human move accepted")
+        .with_move_uci(move_uci)
+        .with_fields(json!({
+            "intent_id": intent_id,
+            "client_action_id": move_context.client_action_id,
+            "ws_connection_id": move_context.ws_connection_id,
+        }));
+    push_runtime_log(&mut runtime.logs, accepted_log);
     if let Some((result, termination)) = classify_position(&runtime.board, &runtime.repetitions) {
         runtime.result = Some(result);
         runtime.termination = Some(termination);
@@ -1460,7 +1710,9 @@ async fn process_human_move(
         runtime.status = MatchStatus::Completed;
     }
     let _ = publish_human_runtime(state, session, runtime, false).await;
-    runtime.seen_intents.insert(intent_id, HumanMoveAck::Accepted);
+    runtime
+        .seen_intents
+        .insert(intent_id, HumanMoveAck::Accepted);
     HumanMoveAck::Accepted
 }
 
@@ -1469,7 +1721,8 @@ async fn process_engine_turn(
     session: &HumanGameSession,
     runtime: &mut HumanGameRuntime,
 ) -> Result<(), ApiError> {
-    if runtime.status != MatchStatus::Running || runtime.board.side_to_move() != runtime.engine_side {
+    if runtime.status != MatchStatus::Running || runtime.board.side_to_move() != runtime.engine_side
+    {
         return Ok(());
     }
     if runtime.move_history.len() as u16 >= runtime.max_plies {
@@ -1493,6 +1746,13 @@ async fn process_engine_turn(
     let board = runtime.board.clone();
     let handled_at = Utc::now();
     let elapsed_started = Instant::now();
+    let started_log = human_runtime_log(
+        session,
+        runtime,
+        "engine.turn_started",
+        "engine turn started",
+    );
+    push_runtime_log(&mut runtime.logs, started_log);
     let mut logs = std::mem::take(&mut runtime.logs);
     let selected = runtime
         .engine
@@ -1509,6 +1769,14 @@ async fn process_engine_turn(
     *clock = clock.saturating_sub(elapsed_ms);
     match selected {
         Ok(selected) => {
+            let returned_log = human_runtime_log(
+                session,
+                runtime,
+                "engine.move_returned",
+                format!("engine returned {selected}"),
+            )
+            .with_move_uci(selected.clone());
+            push_runtime_log(&mut runtime.logs, returned_log);
             if elapsed_ms >= remaining {
                 runtime.result = Some(if runtime.engine_side == cozy_chess::Color::White {
                     GameResult::BlackWin
@@ -1517,6 +1785,13 @@ async fn process_engine_turn(
                 });
                 runtime.termination = Some(arena_core::GameTermination::Timeout);
                 runtime.status = MatchStatus::Completed;
+                let timeout_log = human_runtime_log(
+                    session,
+                    runtime,
+                    "timeout.fired",
+                    "engine exceeded remaining time",
+                );
+                push_runtime_log(&mut runtime.logs, timeout_log);
             } else if selected == "0000" {
                 runtime.result = Some(GameResult::Draw);
                 runtime.termination = Some(arena_core::GameTermination::EngineFailure);
@@ -1536,9 +1811,11 @@ async fn process_engine_turn(
                     let board_hash = runtime.board.hash_without_ep();
                     *runtime.repetitions.entry(board_hash).or_insert(0) += 1;
                     if runtime.engine_side == cozy_chess::Color::White {
-                        runtime.white_time_left_ms = runtime.white_time_left_ms.saturating_add(increment_ms);
+                        runtime.white_time_left_ms =
+                            runtime.white_time_left_ms.saturating_add(increment_ms);
                     } else {
-                        runtime.black_time_left_ms = runtime.black_time_left_ms.saturating_add(increment_ms);
+                        runtime.black_time_left_ms =
+                            runtime.black_time_left_ms.saturating_add(increment_ms);
                     }
                     runtime.turn_started_server_unix_ms = handled_at.timestamp_millis();
                     if let Some((result, termination)) =
@@ -1586,7 +1863,11 @@ mod tests {
     use sqlx::sqlite::SqlitePoolOptions;
     use std::time::Duration;
 
-    use crate::{db::init_db, registry::{SetupRegistryCache, sync_setup_registry_if_changed}, state::{HumanGameStore, TournamentCoordinator}};
+    use crate::{
+        db::init_db,
+        registry::{SetupRegistryCache, sync_setup_registry_if_changed},
+        state::{HumanGameStore, TournamentCoordinator},
+    };
 
     struct SleepyAdapter {
         delay_ms: u64,
@@ -1595,7 +1876,11 @@ mod tests {
 
     #[async_trait]
     impl AgentAdapter for SleepyAdapter {
-        async fn prepare(&mut self, _variant: Variant, _logs: &mut Vec<GameLogEntry>) -> Result<()> {
+        async fn prepare(
+            &mut self,
+            _variant: Variant,
+            _logs: &mut Vec<GameLogEntry>,
+        ) -> Result<()> {
             Ok(())
         }
 
@@ -1637,6 +1922,7 @@ mod tests {
             live_matches: crate::live::LiveMatchStore::default(),
             live_metrics: crate::state::LiveMetricsStore::default(),
             human_games: HumanGameStore::default(),
+            debug_reports_dir: std::env::temp_dir().join("mlchess-debug-reports"),
             frontend_dist: None,
             setup_registry,
         }
@@ -1651,8 +1937,16 @@ mod tests {
             tournament_id: Uuid::new_v4(),
             pool_id: Uuid::new_v4(),
             round_index: 0,
-            white_version_id: if human_plays_white { Uuid::from_u128(1) } else { Uuid::new_v4() },
-            black_version_id: if human_plays_white { Uuid::new_v4() } else { Uuid::from_u128(1) },
+            white_version_id: if human_plays_white {
+                Uuid::from_u128(1)
+            } else {
+                Uuid::new_v4()
+            },
+            black_version_id: if human_plays_white {
+                Uuid::new_v4()
+            } else {
+                Uuid::from_u128(1)
+            },
             opening_id: None,
             game_index: 0,
             status: MatchStatus::Running,
@@ -1673,7 +1967,10 @@ mod tests {
         let runtime = HumanGameRuntime {
             tournament_id: match_series.tournament_id,
             variant: Variant::Standard,
-            time_control: TimeControl { initial_ms: 50, increment_ms: 0 },
+            time_control: TimeControl {
+                initial_ms: 50,
+                increment_ms: 0,
+            },
             start_fen: board.to_string(),
             current_fen: board.to_string(),
             board,
@@ -1683,7 +1980,10 @@ mod tests {
             black_time_left_ms: 50,
             max_plies: 300,
             engine_side,
-            engine: Box::new(SleepyAdapter { delay_ms: 0, move_uci: "e2e4".to_string() }),
+            engine: Box::new(SleepyAdapter {
+                delay_ms: 0,
+                move_uci: "e2e4".to_string(),
+            }),
             logs: Vec::new(),
             started_at: Utc::now(),
             turn_started_server_unix_ms: Utc::now().timestamp_millis(),
@@ -1707,15 +2007,27 @@ mod tests {
             &state,
             &session,
             &mut runtime,
-            Uuid::new_v4(),
-            "e2e4".to_string(),
+            MoveDebugContext {
+                request_id: None,
+                client_action_id: None,
+                ws_connection_id: None,
+                intent_id: Uuid::new_v4(),
+                move_uci: "e2e4".to_string(),
+            },
         )
         .await;
 
         assert!(matches!(ack, HumanMoveAck::RejectedGameFinished));
         assert_eq!(runtime.status, MatchStatus::Completed);
-        assert_eq!(runtime.termination, Some(arena_core::GameTermination::Timeout));
-        let snapshot = state.live_matches.get_snapshot(session.match_series.id).await.unwrap();
+        assert_eq!(
+            runtime.termination,
+            Some(arena_core::GameTermination::Timeout)
+        );
+        let snapshot = state
+            .live_matches
+            .get_snapshot(session.match_series.id)
+            .await
+            .unwrap();
         assert_eq!(snapshot.status, arena_core::LiveStatus::Finished);
         assert_eq!(snapshot.termination, arena_core::LiveTermination::Timeout);
     }
@@ -1730,11 +2042,20 @@ mod tests {
             move_uci: "e2e4".to_string(),
         });
 
-        process_engine_turn(&state, &session, &mut runtime).await.unwrap();
+        process_engine_turn(&state, &session, &mut runtime)
+            .await
+            .unwrap();
 
         assert_eq!(runtime.status, MatchStatus::Completed);
-        assert_eq!(runtime.termination, Some(arena_core::GameTermination::Timeout));
-        let snapshot = state.live_matches.get_snapshot(session.match_series.id).await.unwrap();
+        assert_eq!(
+            runtime.termination,
+            Some(arena_core::GameTermination::Timeout)
+        );
+        let snapshot = state
+            .live_matches
+            .get_snapshot(session.match_series.id)
+            .await
+            .unwrap();
         assert_eq!(snapshot.status, arena_core::LiveStatus::Finished);
         assert_eq!(snapshot.termination, arena_core::LiveTermination::Timeout);
     }
@@ -1758,7 +2079,11 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        let snapshot = state.live_matches.get_snapshot(session.match_series.id).await.unwrap();
+        let snapshot = state
+            .live_matches
+            .get_snapshot(session.match_series.id)
+            .await
+            .unwrap();
         assert_eq!(snapshot.status, arena_core::LiveStatus::Finished);
         assert_eq!(snapshot.termination, arena_core::LiveTermination::Timeout);
         assert_eq!(snapshot.white_remaining_ms, 0);

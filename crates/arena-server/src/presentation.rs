@@ -151,8 +151,16 @@ pub(crate) fn api_match_series(
         game_index: series.game_index,
         status: series.status,
         created_at: series.created_at,
-        white_participant: participant_for_id(series.white_version_id, version_name_by_id, human_player),
-        black_participant: participant_for_id(series.black_version_id, version_name_by_id, human_player),
+        white_participant: participant_for_id(
+            series.white_version_id,
+            version_name_by_id,
+            human_player,
+        ),
+        black_participant: participant_for_id(
+            series.black_version_id,
+            version_name_by_id,
+            human_player,
+        ),
         interactive,
     }
 }
@@ -180,8 +188,16 @@ pub(crate) fn api_game_record(
         black_time_left_ms: game.black_time_left_ms,
         started_at: game.started_at,
         completed_at: game.completed_at,
-        white_participant: participant_for_id(game.white_version_id, version_name_by_id, human_player),
-        black_participant: participant_for_id(game.black_version_id, version_name_by_id, human_player),
+        white_participant: participant_for_id(
+            game.white_version_id,
+            version_name_by_id,
+            human_player,
+        ),
+        black_participant: participant_for_id(
+            game.black_version_id,
+            version_name_by_id,
+            human_player,
+        ),
     }
 }
 

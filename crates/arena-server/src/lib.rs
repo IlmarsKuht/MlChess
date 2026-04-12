@@ -1,32 +1,44 @@
 mod api;
-mod registry;
-mod registry_loader;
-mod registry_sync;
-mod registry_simple_toml;
 mod db;
 mod gameplay;
 mod live;
 mod orchestration;
 mod presentation;
 mod rating;
+mod registry;
+mod registry_loader;
+mod registry_simple_toml;
+mod registry_sync;
 mod state;
 mod storage;
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use axum::{Json, Router, http::StatusCode, response::{IntoResponse, Response}, routing::get};
+use arena_core::{LiveResult, LiveStatus, LiveTermination, ProtocolLiveSide};
+use axum::{
+    Json, Router,
+    body::{Body, to_bytes},
+    extract::{MatchedPath, Request},
+    http::{HeaderName, HeaderValue, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    routing::get,
+};
 use db::init_db;
+use live::LiveMatchStore;
+use orchestration::{restore_engine_game, restore_human_game};
 use registry::{SetupRegistryCache, sync_setup_registry_if_changed};
 use serde_json::{Value, json};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use state::{
+    AppState, HumanGameStore, LiveMetricsStore, RequestContext, RequestJournalEntry,
+    TournamentCoordinator,
+};
 use tower::ServiceBuilder;
 use tower_http::{cors::CorsLayer, services::ServeDir};
-use tracing::{error, info};
-use live::LiveMatchStore;
-use orchestration::{restore_engine_game, restore_human_game};
-use state::{AppState, HumanGameStore, LiveMetricsStore, TournamentCoordinator};
-use arena_core::{LiveResult, LiveStatus, LiveTermination, ProtocolLiveSide};
+use tracing::{error, info, warn};
+use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
 enum ApiError {
@@ -91,6 +103,7 @@ pub async fn run_server(
         live_matches: LiveMatchStore::default(),
         live_metrics: LiveMetricsStore::default(),
         human_games: HumanGameStore::default(),
+        debug_reports_dir: std::env::current_dir()?.join("debug-reports"),
         frontend_dist: frontend_dist.clone(),
         setup_registry,
     };
@@ -103,8 +116,12 @@ pub async fn run_server(
 }
 
 pub fn build_app(state: AppState) -> Router {
+    let api = api::router().layer(middleware::from_fn_with_state(
+        state.clone(),
+        request_context_middleware,
+    ));
     let mut app = Router::new()
-        .nest("/api", api::router())
+        .nest("/api", api)
         .layer(ServiceBuilder::new().layer(CorsLayer::permissive()))
         .with_state(state.clone());
 
@@ -117,35 +134,183 @@ pub fn build_app(state: AppState) -> Router {
     app
 }
 
+async fn request_context_middleware(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let started_at = chrono::Utc::now();
+    let method = request.method().as_str().to_string();
+    let matched_path = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(MatchedPath::as_str)
+        .unwrap_or_else(|| request.uri().path())
+        .to_string();
+    let request_id =
+        request_header_uuid(request.headers(), "x-request-id").unwrap_or_else(Uuid::new_v4);
+    let context = RequestContext {
+        request_id,
+        client_action_id: request_header_uuid(request.headers(), "x-client-action-id"),
+        client_route: request
+            .headers()
+            .get("x-client-route")
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned),
+        client_ts: request
+            .headers()
+            .get("x-client-ts")
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned),
+        method: method.clone(),
+        route: matched_path.clone(),
+    };
+    request.extensions_mut().insert(context.clone());
+    let (match_id, tournament_id, game_id) = infer_entity_ids(request.uri().path());
+
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        HeaderName::from_static("x-request-id"),
+        HeaderValue::from_str(&request_id.to_string())
+            .unwrap_or_else(|_| HeaderValue::from_static("invalid-request-id")),
+    );
+    response = enrich_error_response(response, request_id).await;
+
+    let completed_at = chrono::Utc::now();
+    let status_code = response.status().as_u16();
+    let error_text = response.extensions().get::<String>().cloned().or_else(|| {
+        (status_code >= 400).then(|| format!("request failed with status {status_code}"))
+    });
+    let duration_ms = (completed_at - started_at).num_milliseconds();
+
+    let journal = RequestJournalEntry {
+        request_id,
+        client_action_id: context.client_action_id,
+        client_route: context.client_route.clone(),
+        client_ts: context.client_ts.clone(),
+        method,
+        route: matched_path,
+        status_code,
+        match_id,
+        tournament_id,
+        game_id,
+        started_at,
+        completed_at,
+        duration_ms,
+        error_text,
+    };
+    if let Err(err) = crate::storage::insert_request_journal_entry(&state.db, &journal).await {
+        warn!(request_id = %request_id, "failed to persist request journal entry: {err:#}");
+    }
+    info!(
+        request_id = %request_id,
+        client_action_id = ?context.client_action_id,
+        client_route = ?context.client_route,
+        status_code,
+        route = %journal.route,
+        match_id = ?journal.match_id,
+        tournament_id = ?journal.tournament_id,
+        game_id = ?journal.game_id,
+        "handled api request"
+    );
+    response
+}
+
+async fn enrich_error_response(response: Response, request_id: Uuid) -> Response {
+    if response.status().is_success() {
+        return response;
+    }
+    let (parts, body) = response.into_parts();
+    let bytes = match to_bytes(body, usize::MAX).await {
+        Ok(bytes) => bytes,
+        Err(_) => return Response::from_parts(parts, Body::empty()),
+    };
+    let mut payload = serde_json::from_slice::<Value>(&bytes)
+        .unwrap_or_else(|_| json!({ "error": "request failed" }));
+    if payload.get("request_id").is_none() {
+        payload["request_id"] = json!(request_id);
+    }
+    let mut rebuilt = Response::from_parts(parts, Body::from(payload.to_string()));
+    rebuilt.headers_mut().insert(
+        HeaderName::from_static("content-type"),
+        HeaderValue::from_static("application/json"),
+    );
+    if let Some(error_text) = payload.get("error").and_then(Value::as_str) {
+        rebuilt.extensions_mut().insert(error_text.to_string());
+    }
+    rebuilt
+}
+
+fn request_header_uuid(headers: &axum::http::HeaderMap, name: &'static str) -> Option<Uuid> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| Uuid::parse_str(value).ok())
+}
+
+fn infer_entity_ids(path: &str) -> (Option<Uuid>, Option<Uuid>, Option<Uuid>) {
+    let segments: Vec<_> = path.trim_matches('/').split('/').collect();
+    let mut match_id = None;
+    let mut tournament_id = None;
+    let mut game_id = None;
+    for window in segments.windows(2) {
+        let Some(id) = Uuid::parse_str(window[1]).ok() else {
+            continue;
+        };
+        match window[0] {
+            "matches" => match_id = Some(id),
+            "tournaments" => tournament_id = Some(id),
+            "games" => game_id = Some(id),
+            _ => {}
+        }
+    }
+    (match_id, tournament_id, game_id)
+}
+
 async fn restore_live_runtime(state: &AppState) -> Result<()> {
     let checkpoints =
         crate::storage::list_live_runtime_checkpoints(&state.db, Some(LiveStatus::Running)).await?;
     let human_player = crate::storage::ensure_human_player(&state.db).await?;
-    state
-        .live_metrics
-        .restored_matches
-        .store(checkpoints.len() as u64, std::sync::atomic::Ordering::Relaxed);
-    info!(restored_matches = checkpoints.len(), "restoring live runtime checkpoints");
+    state.live_metrics.restored_matches.store(
+        checkpoints.len() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    info!(
+        restored_matches = checkpoints.len(),
+        "restoring live runtime checkpoints"
+    );
     for checkpoint in checkpoints {
-        let match_series = match crate::storage::get_match_series(&state.db, checkpoint.match_id).await {
-            Ok(value) => value,
-            Err(err) => {
-                error!("failed to load match series for restored live match {}: {err}", checkpoint.match_id);
-                continue;
-            }
-        };
+        let match_series =
+            match crate::storage::get_match_series(&state.db, checkpoint.match_id).await {
+                Ok(value) => value,
+                Err(err) => {
+                    error!(
+                        "failed to load match series for restored live match {}: {err}",
+                        checkpoint.match_id
+                    );
+                    continue;
+                }
+            };
         state
             .live_matches
             .bootstrap_from_db(&state.db, checkpoint.match_id)
             .await?;
-        if match_series.white_version_id == human_player.id || match_series.black_version_id == human_player.id {
+        if match_series.white_version_id == human_player.id
+            || match_series.black_version_id == human_player.id
+        {
             if let Err(err) = restore_human_game(state, checkpoint.clone()).await {
-                error!("failed to restore human live match {}: {err}", checkpoint.match_id);
+                error!(
+                    "failed to restore human live match {}: {err}",
+                    checkpoint.match_id
+                );
                 fail_closed_live_match(state, &match_series, checkpoint.clone()).await?;
             }
         } else {
             if let Err(err) = restore_engine_game(state, checkpoint.clone()).await {
-                error!("failed to restore engine live match {}: {err}", checkpoint.match_id);
+                error!(
+                    "failed to restore engine live match {}: {err}",
+                    checkpoint.match_id
+                );
                 fail_closed_live_match(state, &match_series, checkpoint.clone()).await?;
             }
         }
@@ -169,10 +334,17 @@ async fn fail_closed_live_match(
         &state.db,
         Some(&state.live_metrics),
         checkpoint.clone(),
-        arena_core::LiveEventEnvelope::GameFinished(live::game_finished_from_checkpoint(&checkpoint)),
+        arena_core::LiveEventEnvelope::GameFinished(live::game_finished_from_checkpoint(
+            &checkpoint,
+        )),
     )
     .await?;
-    crate::storage::update_match_series_status(&state.db, match_series.id, arena_core::MatchStatus::Failed).await?;
+    crate::storage::update_match_series_status(
+        &state.db,
+        match_series.id,
+        arena_core::MatchStatus::Failed,
+    )
+    .await?;
     crate::storage::update_tournament_status(
         &state.db,
         match_series.tournament_id,
@@ -206,12 +378,18 @@ fn workspace_root() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arena_core::{GameRecord, GameResult, GameTermination, MatchSeries, MatchStatus, Tournament, TournamentKind, TournamentStatus};
+    use crate::storage::{
+        insert_game, insert_match_series, insert_tournament, list_agent_versions, list_agents,
+        list_games, list_match_series, list_pools, list_tournaments, load_aggregate_leaderboard,
+    };
+    use arena_core::{
+        GameRecord, GameResult, GameTermination, MatchSeries, MatchStatus, Tournament,
+        TournamentKind, TournamentStatus,
+    };
     use axum::body::Body;
     use chrono::Utc;
     use tower::ServiceExt;
     use uuid::Uuid;
-    use crate::storage::{insert_game, insert_match_series, insert_tournament, list_agent_versions, list_agents, list_games, list_match_series, list_pools, list_tournaments, load_aggregate_leaderboard};
 
     async fn setup_app() -> Router {
         let db = SqlitePoolOptions::new()
@@ -230,6 +408,7 @@ mod tests {
             live_matches: LiveMatchStore::default(),
             live_metrics: LiveMetricsStore::default(),
             human_games: HumanGameStore::default(),
+            debug_reports_dir: std::env::temp_dir().join("mlchess-debug-reports"),
             frontend_dist: None,
             setup_registry,
         })
@@ -376,6 +555,7 @@ mod tests {
             live_matches: LiveMatchStore::default(),
             live_metrics: LiveMetricsStore::default(),
             human_games: HumanGameStore::default(),
+            debug_reports_dir: std::env::temp_dir().join("mlchess-debug-reports"),
             frontend_dist: Some(frontend_dist),
             setup_registry,
         });
@@ -458,6 +638,7 @@ mod tests {
             live_matches: LiveMatchStore::default(),
             live_metrics: LiveMetricsStore::default(),
             human_games: HumanGameStore::default(),
+            debug_reports_dir: std::env::temp_dir().join("mlchess-debug-reports"),
             frontend_dist: None,
             setup_registry,
         });
@@ -485,6 +666,7 @@ mod tests {
             live_matches: LiveMatchStore::default(),
             live_metrics: LiveMetricsStore::default(),
             human_games: HumanGameStore::default(),
+            debug_reports_dir: std::env::temp_dir().join("mlchess-debug-reports"),
             frontend_dist: None,
             setup_registry,
         };
@@ -507,7 +689,9 @@ mod tests {
             started_at: Some(Utc::now()),
             completed_at: None,
         };
-        crate::storage::insert_tournament(&db, &tournament).await.unwrap();
+        crate::storage::insert_tournament(&db, &tournament)
+            .await
+            .unwrap();
         crate::storage::insert_match_series(
             &db,
             &MatchSeries {
@@ -545,14 +729,20 @@ mod tests {
         crate::storage::insert_live_runtime_event(
             &db,
             &arena_core::LiveEventEnvelope::Snapshot(crate::live::snapshot_from_checkpoint(
-                &arena_core::LiveRuntimeCheckpoint { seq: 1, moves: Vec::new(), ..checkpoint.clone() },
+                &arena_core::LiveRuntimeCheckpoint {
+                    seq: 1,
+                    moves: Vec::new(),
+                    ..checkpoint.clone()
+                },
             )),
         )
         .await
         .unwrap();
         crate::storage::insert_live_runtime_event(
             &db,
-            &arena_core::LiveEventEnvelope::MoveCommitted(crate::live::move_committed_from_checkpoint(&checkpoint)),
+            &arena_core::LiveEventEnvelope::MoveCommitted(
+                crate::live::move_committed_from_checkpoint(&checkpoint),
+            ),
         )
         .await
         .unwrap();

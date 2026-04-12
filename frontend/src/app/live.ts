@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { fetchJson, wsUrl } from "./api";
+import { createClientActionId, recordWsDebug, setUiDebugState } from "./debug";
 import type {
   GameTermination,
   LiveErrorMessage,
@@ -172,6 +173,8 @@ export function useConfirmedLiveMatch(matchId: string) {
   const stateRef = useRef<ConfirmedLiveState | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
+  const wsConnectionIdRef = useRef<string | null>(null);
+  const connectAttemptRef = useRef(0);
 
   useEffect(() => {
     if (!matchId) {
@@ -230,6 +233,13 @@ export function useConfirmedLiveMatch(matchId: string) {
       if (result.kind === "next") {
         stateRef.current = result.state;
         setState(result.state);
+        setUiDebugState({
+          current_snapshot_seq: result.state.snapshot?.seq,
+          current_live_status: result.state.snapshot?.status,
+          live_summary: result.state.snapshot
+            ? `seq ${result.state.snapshot.seq} ${result.state.snapshot.status} ${result.state.snapshot.side_to_move}`
+            : undefined
+        });
       }
     };
 
@@ -240,8 +250,11 @@ export function useConfirmedLiveMatch(matchId: string) {
       clearReconnect();
       closeSocket();
 
-      const socket = new WebSocket(wsUrl(`/matches/${matchId}/live/ws`));
+      const liveWsUrl = wsUrl(`/matches/${matchId}/live/ws`);
+      connectAttemptRef.current += 1;
+      const socket = new WebSocket(liveWsUrl);
       socketRef.current = socket;
+      wsConnectionIdRef.current = crypto.randomUUID();
 
       socket.onopen = () => {
         if (cancelled) {
@@ -249,8 +262,18 @@ export function useConfirmedLiveMatch(matchId: string) {
         }
         setIsConnected(true);
         setError("");
+        setUiDebugState({ ws_connected: true, ws_connection_id: wsConnectionIdRef.current ?? undefined });
+        recordWsDebug({
+          at: new Date().toISOString(),
+          event: "ws.open",
+          match_id: matchId,
+          url: liveWsUrl,
+          attempt: connectAttemptRef.current,
+          ws_connection_id: wsConnectionIdRef.current ?? undefined
+        });
         const subscribe: LiveWsClientMessage = {
           message_type: "subscribe",
+          ws_connection_id: wsConnectionIdRef.current ?? undefined,
           ...(stateRef.current?.snapshot?.seq !== undefined ? { last_seq: stateRef.current.snapshot.seq } : {})
         };
         socket.send(JSON.stringify(subscribe));
@@ -259,16 +282,48 @@ export function useConfirmedLiveMatch(matchId: string) {
       socket.onmessage = (messageEvent) => {
         try {
           const message = JSON.parse(messageEvent.data) as LiveWsServerMessage;
+          recordWsDebug({
+            at: new Date().toISOString(),
+            event: "ws.message",
+            match_id: matchId,
+            url: liveWsUrl,
+            attempt: connectAttemptRef.current,
+            ws_connection_id: wsConnectionIdRef.current ?? undefined,
+            payload: message
+          });
           if (isProtocolEvent(message)) {
             handleProtocolEvent(message);
             return;
           }
           if (isErrorMessage(message)) {
             setError(message.error);
+            setUiDebugState({
+              last_ui_error: message.error,
+              last_client_action_id: message.client_action_id,
+              ws_connection_id: message.ws_connection_id ?? wsConnectionIdRef.current ?? undefined
+            });
+            recordWsDebug({
+              at: new Date().toISOString(),
+              event: "ws.server_error",
+              match_id: matchId,
+              url: liveWsUrl,
+              attempt: connectAttemptRef.current,
+              ws_connection_id: message.ws_connection_id ?? wsConnectionIdRef.current ?? undefined,
+              client_action_id: message.client_action_id,
+              request_id: message.request_id,
+              payload: message
+            });
             return;
           }
           if (isIntentAck(message) && message.ack === "duplicate") {
             setError("Move was already submitted.");
+          }
+          if (isIntentAck(message)) {
+            setUiDebugState({
+              last_intent_id: message.intent_id,
+              last_client_action_id: message.client_action_id,
+              ws_connection_id: message.ws_connection_id ?? wsConnectionIdRef.current ?? undefined
+            });
           }
         } catch {
           // Ignore malformed websocket payloads and wait for the next message.
@@ -277,11 +332,32 @@ export function useConfirmedLiveMatch(matchId: string) {
 
       socket.onerror = () => {
         setIsConnected(false);
+        setUiDebugState({ ws_connected: false });
+        recordWsDebug({
+          at: new Date().toISOString(),
+          event: "ws.error",
+          match_id: matchId,
+          url: liveWsUrl,
+          attempt: connectAttemptRef.current,
+          ws_connection_id: wsConnectionIdRef.current ?? undefined
+        });
       };
 
-      socket.onclose = () => {
+      socket.onclose = (event) => {
         setIsConnected(false);
         socketRef.current = null;
+        setUiDebugState({ ws_connected: false });
+        recordWsDebug({
+          at: new Date().toISOString(),
+          event: "ws.close",
+          match_id: matchId,
+          url: liveWsUrl,
+          attempt: connectAttemptRef.current,
+          ws_connection_id: wsConnectionIdRef.current ?? undefined,
+          close_code: event.code,
+          close_reason: event.reason || undefined,
+          was_clean: event.wasClean
+        });
         if (!cancelled) {
           if (!stateRef.current?.snapshot) {
             void loadSnapshot().catch(() => {
@@ -312,8 +388,25 @@ export function useConfirmedLiveMatch(matchId: string) {
     const payload: LiveSubmitMoveMessage = {
       message_type: "submit_move",
       intent_id: crypto.randomUUID(),
+      client_action_id: createClientActionId(),
+      ws_connection_id: wsConnectionIdRef.current ?? undefined,
       move_uci
     };
+    setUiDebugState({
+      last_intent_id: payload.intent_id,
+      last_client_action_id: payload.client_action_id,
+      ws_connection_id: wsConnectionIdRef.current ?? undefined
+    });
+    recordWsDebug({
+      at: new Date().toISOString(),
+      event: "ws.submit_move",
+      match_id: matchId,
+      url: socket.url,
+      ws_connection_id: wsConnectionIdRef.current ?? undefined,
+      client_action_id: payload.client_action_id,
+      intent_id: payload.intent_id,
+      payload
+    });
     socket.send(JSON.stringify(payload));
   };
 

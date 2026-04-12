@@ -4,8 +4,9 @@ use std::{
 };
 
 use arena_core::{
-    ClockSyncEvent, GameResult, GameTermination, LiveEventEnvelope, LiveEventType, LiveMatchSnapshot,
-    LiveResult, LiveRuntimeCheckpoint, LiveStatus, MoveCommittedEvent, ProtocolLiveSide,
+    ClockSyncEvent, GameResult, GameTermination, LiveEventEnvelope, LiveEventType,
+    LiveMatchSnapshot, LiveResult, LiveRuntimeCheckpoint, LiveStatus, MoveCommittedEvent,
+    ProtocolLiveSide,
 };
 use tracing::info;
 use uuid::Uuid;
@@ -51,13 +52,21 @@ impl LiveMatchStore {
         let Some(checkpoint) = load_live_runtime_checkpoint(db, match_id).await? else {
             return Ok(());
         };
-        let replay = load_live_runtime_events_since(db, match_id, checkpoint.seq.saturating_sub(REPLAY_LIMIT as u64)).await?;
+        let replay = load_live_runtime_events_since(
+            db,
+            match_id,
+            checkpoint.seq.saturating_sub(REPLAY_LIMIT as u64),
+        )
+        .await?;
         let (sender, _) = tokio::sync::broadcast::channel(256);
-        self.entries.write().await.insert(match_id, LiveMatchEntry {
-            checkpoint,
-            replay: replay.into(),
-            sender,
-        });
+        self.entries.write().await.insert(
+            match_id,
+            LiveMatchEntry {
+                checkpoint,
+                replay: replay.into(),
+                sender,
+            },
+        );
         Ok(())
     }
 
@@ -72,17 +81,19 @@ impl LiveMatchStore {
     pub(crate) async fn subscribe(
         &self,
         match_id: Uuid,
-    ) -> Option<(LiveMatchSnapshot, tokio::sync::broadcast::Receiver<LiveEventEnvelope>)> {
+    ) -> Option<(
+        LiveMatchSnapshot,
+        tokio::sync::broadcast::Receiver<LiveEventEnvelope>,
+    )> {
         let entries = self.entries.read().await;
         let entry = entries.get(&match_id)?;
-        Some((snapshot_from_checkpoint(&entry.checkpoint), entry.sender.subscribe()))
+        Some((
+            snapshot_from_checkpoint(&entry.checkpoint),
+            entry.sender.subscribe(),
+        ))
     }
 
-    pub(crate) async fn replay_since(
-        &self,
-        match_id: Uuid,
-        seq: u64,
-    ) -> Option<ReplayResult> {
+    pub(crate) async fn replay_since(&self, match_id: Uuid, seq: u64) -> Option<ReplayResult> {
         self.entries.read().await.get(&match_id).map(|entry| {
             let oldest_seq = entry.replay.front().map(event_seq);
             if let Some(oldest_seq) = oldest_seq
@@ -174,7 +185,6 @@ impl LiveMatchStore {
     }
 }
 
-
 pub(crate) async fn publish_with_metrics(
     live_matches: &LiveMatchStore,
     db: &sqlx::SqlitePool,
@@ -224,7 +234,9 @@ pub(crate) fn snapshot_from_checkpoint(checkpoint: &LiveRuntimeCheckpoint) -> Li
     }
 }
 
-pub(crate) fn move_committed_from_checkpoint(checkpoint: &LiveRuntimeCheckpoint) -> MoveCommittedEvent {
+pub(crate) fn move_committed_from_checkpoint(
+    checkpoint: &LiveRuntimeCheckpoint,
+) -> MoveCommittedEvent {
     MoveCommittedEvent {
         protocol_version: LIVE_PROTOCOL_VERSION,
         event_type: LiveEventType::MoveCommitted,
@@ -294,7 +306,9 @@ pub(crate) fn live_result_from_game_result(result: GameResult) -> LiveResult {
     }
 }
 
-pub(crate) fn live_termination_from_game_termination(termination: GameTermination) -> arena_core::LiveTermination {
+pub(crate) fn live_termination_from_game_termination(
+    termination: GameTermination,
+) -> arena_core::LiveTermination {
     match termination {
         GameTermination::Checkmate => arena_core::LiveTermination::Checkmate,
         GameTermination::Stalemate => arena_core::LiveTermination::Stalemate,
@@ -336,7 +350,12 @@ mod tests {
 
     use crate::db::init_db;
 
-    fn checkpoint(match_id: Uuid, seq: u64, moves: &[&str], status: LiveStatus) -> LiveRuntimeCheckpoint {
+    fn checkpoint(
+        match_id: Uuid,
+        seq: u64,
+        moves: &[&str],
+        status: LiveStatus,
+    ) -> LiveRuntimeCheckpoint {
         LiveRuntimeCheckpoint {
             match_id,
             seq,
@@ -518,8 +537,8 @@ mod tests {
                 LiveEventEnvelope::MoveCommitted(move_committed_from_checkpoint(&checkpoint))
             };
             publish_with_metrics(&store, &db, None, checkpoint, event)
-            .await
-            .unwrap();
+                .await
+                .unwrap();
         }
 
         assert!(matches!(

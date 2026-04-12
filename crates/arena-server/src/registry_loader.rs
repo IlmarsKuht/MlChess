@@ -146,14 +146,23 @@ pub(crate) fn collect_registry_files(workspace_root: &Path) -> Result<Vec<PathBu
         files.push(root_manifest);
     }
 
-    files.extend(collect_named_files(&workspace_root.join("engines"), "Cargo.toml")?);
+    files.extend(collect_named_files(
+        &workspace_root.join("engines"),
+        "Cargo.toml",
+    )?);
     files.extend(collect_named_files(
         &workspace_root.join("engines"),
         "arena-engine.toml",
     )?);
-    files.extend(collect_toml_files(&workspace_root.join("setup").join("openings"))?);
-    files.extend(collect_toml_files(&workspace_root.join("setup").join("pools"))?);
-    files.extend(collect_toml_files(&workspace_root.join("setup").join("events"))?);
+    files.extend(collect_toml_files(
+        &workspace_root.join("setup").join("openings"),
+    )?);
+    files.extend(collect_toml_files(
+        &workspace_root.join("setup").join("pools"),
+    )?);
+    files.extend(collect_toml_files(
+        &workspace_root.join("setup").join("events"),
+    )?);
     files.sort();
     Ok(files)
 }
@@ -190,7 +199,11 @@ fn collect_toml_files(root: &Path) -> Result<Vec<PathBuf>> {
     {
         let entry = entry?;
         if entry.file_type()?.is_file()
-            && entry.path().extension().and_then(|extension| extension.to_str()) == Some("toml")
+            && entry
+                .path()
+                .extension()
+                .and_then(|extension| extension.to_str())
+                == Some("toml")
         {
             files.push(entry.path());
         }
@@ -320,9 +333,7 @@ fn rust_engine_binary_path(workspace_root: &Path, package_name: &str) -> String 
         .ok()
         .and_then(|path| path.parent().map(|parent| parent.join(&binary_name)));
 
-    if let Some(candidate) = candidate_from_current_exe
-        .filter(|path| path.exists())
-    {
+    if let Some(candidate) = candidate_from_current_exe.filter(|path| path.exists()) {
         return candidate.to_string_lossy().into_owned();
     }
 
@@ -646,7 +657,9 @@ fn resolve_documentation(
             let path = resolve_relative_to(base_dir, &file)?;
             Ok(Some(
                 fs::read_to_string(&path)
-                    .with_context(|| format!("failed to read documentation file {}", path.display()))?
+                    .with_context(|| {
+                        format!("failed to read documentation file {}", path.display())
+                    })?
                     .trim()
                     .to_string(),
             )

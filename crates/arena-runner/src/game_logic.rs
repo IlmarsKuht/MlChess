@@ -3,7 +3,11 @@ use std::collections::HashMap;
 use arena_core::{GameResult, GameTermination, OpeningPosition, Variant};
 use cozy_chess::{Board, Color, GameStatus, Piece};
 
-pub fn starting_board(variant: Variant, opening: Option<&OpeningPosition>, seed: Option<u64>) -> Board {
+pub fn starting_board(
+    variant: Variant,
+    opening: Option<&OpeningPosition>,
+    seed: Option<u64>,
+) -> Board {
     if let Some(opening) = opening {
         return Board::from_fen(&opening.fen, opening.variant.is_chess960())
             .expect("opening FEN should already be normalized");

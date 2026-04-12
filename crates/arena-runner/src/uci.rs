@@ -155,12 +155,12 @@ impl UciSession {
     }
 
     async fn send(&mut self, command: &str, logs: &mut Vec<GameLogEntry>) -> Result<()> {
-        logs.push(GameLogEntry {
-            timestamp_ms: 0,
-            level: "debug".to_string(),
-            source: "runner->engine".to_string(),
-            message: command.to_string(),
-        });
+        logs.push(GameLogEntry::new(
+            "uci.command_sent",
+            "debug",
+            "runner->engine",
+            command.to_string(),
+        ));
         self.stdin.write_all(command.as_bytes()).await?;
         self.stdin.write_all(b"\n").await?;
         self.stdin.flush().await?;
@@ -181,12 +181,12 @@ impl UciSession {
             .await
             .context("timed out waiting for engine output")??;
         let line = line.context("engine process ended unexpectedly")?;
-        logs.push(GameLogEntry {
-            timestamp_ms: 0,
-            level: "debug".to_string(),
-            source: "engine->runner".to_string(),
-            message: line.clone(),
-        });
+        logs.push(GameLogEntry::new(
+            "uci.output_received",
+            "debug",
+            "engine->runner",
+            line.clone(),
+        ));
         Ok(line)
     }
 }

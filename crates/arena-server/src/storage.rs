@@ -15,7 +15,7 @@ use crate::{
     db::{as_bool, decode_json, encode_json, parse_ts, ts},
     presentation::HumanPlayerProfile,
     rating::default_entry,
-    state::HumanPlayer,
+    state::{HumanPlayer, RequestJournalEntry},
 };
 
 pub(crate) async fn insert_agent(db: &SqlitePool, agent: &Agent) -> Result<()> {
@@ -132,7 +132,10 @@ pub(crate) async fn update_agent_version(db: &SqlitePool, version: &AgentVersion
     Ok(())
 }
 
-pub(crate) async fn list_agent_versions(db: &SqlitePool, agent_id: Option<Uuid>) -> Result<Vec<AgentVersion>> {
+pub(crate) async fn list_agent_versions(
+    db: &SqlitePool,
+    agent_id: Option<Uuid>,
+) -> Result<Vec<AgentVersion>> {
     let rows = if let Some(agent_id) = agent_id {
         sqlx::query("SELECT * FROM agent_versions WHERE agent_id = ? ORDER BY created_at DESC")
             .bind(agent_id.to_string())
@@ -146,7 +149,10 @@ pub(crate) async fn list_agent_versions(db: &SqlitePool, agent_id: Option<Uuid>)
     rows.into_iter().map(agent_version_from_row).collect()
 }
 
-pub(crate) async fn list_agent_versions_by_ids(db: &SqlitePool, ids: &[Uuid]) -> Result<Vec<AgentVersion>> {
+pub(crate) async fn list_agent_versions_by_ids(
+    db: &SqlitePool,
+    ids: &[Uuid],
+) -> Result<Vec<AgentVersion>> {
     let versions = list_agent_versions(db, None).await?;
     Ok(versions
         .into_iter()
@@ -482,8 +488,14 @@ fn tournament_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Tournament> {
         games_per_pairing: row.get::<i64, _>("games_per_pairing") as u16,
         status: decode_json(&row.get::<String, _>("status"))?,
         created_at: parse_ts(row.get("created_at"))?,
-        started_at: row.get::<Option<String>, _>("started_at").map(parse_ts).transpose()?,
-        completed_at: row.get::<Option<String>, _>("completed_at").map(parse_ts).transpose()?,
+        started_at: row
+            .get::<Option<String>, _>("started_at")
+            .map(parse_ts)
+            .transpose()?,
+        completed_at: row
+            .get::<Option<String>, _>("completed_at")
+            .map(parse_ts)
+            .transpose()?,
     })
 }
 
@@ -535,7 +547,11 @@ pub(crate) async fn get_match_series(db: &SqlitePool, id: Uuid) -> Result<MatchS
         .ok_or_else(|| ApiError::NotFound(format!("match series {id} not found")))
 }
 
-pub(crate) async fn update_match_series_status(db: &SqlitePool, id: Uuid, status: MatchStatus) -> Result<()> {
+pub(crate) async fn update_match_series_status(
+    db: &SqlitePool,
+    id: Uuid,
+    status: MatchStatus,
+) -> Result<()> {
     sqlx::query("UPDATE match_series SET status = ? WHERE id = ?")
         .bind(encode_json(&status)?)
         .bind(id.to_string())
@@ -552,7 +568,10 @@ fn match_series_from_row(row: sqlx::sqlite::SqliteRow) -> Result<MatchSeries> {
         round_index: row.get::<i64, _>("round_index") as u32,
         white_version_id: Uuid::parse_str(&row.get::<String, _>("white_version_id"))?,
         black_version_id: Uuid::parse_str(&row.get::<String, _>("black_version_id"))?,
-        opening_id: row.get::<Option<String>, _>("opening_id").map(|value| Uuid::parse_str(&value)).transpose()?,
+        opening_id: row
+            .get::<Option<String>, _>("opening_id")
+            .map(|value| Uuid::parse_str(&value))
+            .transpose()?,
         game_index: row.get::<i64, _>("game_index") as u32,
         status: decode_json(&row.get::<String, _>("status"))?,
         created_at: parse_ts(row.get("created_at"))?,
@@ -633,7 +652,9 @@ pub(crate) async fn list_games(
         .map(game_from_row)
         .filter(|result| match result {
             Ok(game) => {
-                tournament_id.map(|id| game.tournament_id == id).unwrap_or(true)
+                tournament_id
+                    .map(|id| game.tournament_id == id)
+                    .unwrap_or(true)
                     && agent_version_id
                         .map(|id| game.white_version_id == id || game.black_version_id == id)
                         .unwrap_or(true)
@@ -667,7 +688,10 @@ fn game_from_row(row: sqlx::sqlite::SqliteRow) -> Result<GameRecord> {
         match_id: Uuid::parse_str(&row.get::<String, _>("match_id"))?,
         pool_id: Uuid::parse_str(&row.get::<String, _>("pool_id"))?,
         variant: decode_json(&row.get::<String, _>("variant"))?,
-        opening_id: row.get::<Option<String>, _>("opening_id").map(|value| Uuid::parse_str(&value)).transpose()?,
+        opening_id: row
+            .get::<Option<String>, _>("opening_id")
+            .map(|value| Uuid::parse_str(&value))
+            .transpose()?,
         white_version_id: Uuid::parse_str(&row.get::<String, _>("white_version_id"))?,
         black_version_id: Uuid::parse_str(&row.get::<String, _>("black_version_id"))?,
         result: decode_json(&row.get::<String, _>("result"))?,
@@ -683,7 +707,10 @@ fn game_from_row(row: sqlx::sqlite::SqliteRow) -> Result<GameRecord> {
     })
 }
 
-pub(crate) async fn insert_rating_snapshot(db: &SqlitePool, snapshot: &RatingSnapshot) -> Result<()> {
+pub(crate) async fn insert_rating_snapshot(
+    db: &SqlitePool,
+    snapshot: &RatingSnapshot,
+) -> Result<()> {
     sqlx::query(
         "INSERT INTO rating_snapshots (
             id, pool_id, agent_version_id, rating, games_played, wins, draws, losses, created_at
@@ -703,7 +730,10 @@ pub(crate) async fn insert_rating_snapshot(db: &SqlitePool, snapshot: &RatingSna
     Ok(())
 }
 
-pub(crate) async fn insert_human_rating_snapshot(db: &SqlitePool, snapshot: &RatingSnapshot) -> Result<()> {
+pub(crate) async fn insert_human_rating_snapshot(
+    db: &SqlitePool,
+    snapshot: &RatingSnapshot,
+) -> Result<()> {
     sqlx::query(
         "INSERT INTO human_rating_snapshots (
             id, pool_id, human_player_id, rating, games_played, wins, draws, losses, created_at
@@ -739,7 +769,9 @@ pub(crate) async fn load_rating_history(
         .map(rating_snapshot_from_row)
         .filter(|result| match result {
             Ok(snapshot) => {
-                pool_id.map(|value| snapshot.pool_id == Some(value)).unwrap_or(true)
+                pool_id
+                    .map(|value| snapshot.pool_id == Some(value))
+                    .unwrap_or(true)
                     && agent_version_id
                         .map(|value| snapshot.agent_version_id == value)
                         .unwrap_or(true)
@@ -755,7 +787,10 @@ fn rating_snapshot_from_row(row: sqlx::sqlite::SqliteRow) -> Result<RatingSnapsh
         .or_else(|_| row.try_get::<String, _>("human_player_id"))?;
     Ok(RatingSnapshot {
         id: Uuid::parse_str(&row.get::<String, _>("id"))?,
-        pool_id: row.get::<Option<String>, _>("pool_id").map(|value| Uuid::parse_str(&value)).transpose()?,
+        pool_id: row
+            .get::<Option<String>, _>("pool_id")
+            .map(|value| Uuid::parse_str(&value))
+            .transpose()?,
         agent_version_id: Uuid::parse_str(&participant_id)?,
         rating: row.get("rating"),
         games_played: row.get::<i64, _>("games_played") as u32,
@@ -777,19 +812,23 @@ pub(crate) async fn ensure_leaderboard_seed(
         .map(|entry| (entry.agent_version_id, entry))
         .collect();
     for participant in participants {
-        leaderboard.entry(*participant).or_insert_with(|| default_entry(*participant));
+        leaderboard
+            .entry(*participant)
+            .or_insert_with(|| default_entry(*participant));
     }
     Ok(leaderboard)
 }
 
-pub(crate) async fn load_pool_leaderboard(db: &SqlitePool, pool_id: Uuid) -> Result<Vec<LeaderboardEntry>> {
+pub(crate) async fn load_pool_leaderboard(
+    db: &SqlitePool,
+    pool_id: Uuid,
+) -> Result<Vec<LeaderboardEntry>> {
     let human_id = Uuid::from_u128(1);
-    let mut entries_by_version: HashMap<Uuid, LeaderboardEntry> =
-        list_agent_versions(db, None)
-            .await?
-            .into_iter()
-            .map(|version| (version.id, default_entry(version.id)))
-            .collect();
+    let mut entries_by_version: HashMap<Uuid, LeaderboardEntry> = list_agent_versions(db, None)
+        .await?
+        .into_iter()
+        .map(|version| (version.id, default_entry(version.id)))
+        .collect();
     entries_by_version.insert(human_id, default_entry(human_id));
     let snapshots = load_rating_history(db, Some(pool_id), None).await?;
     for snapshot in snapshots {
@@ -828,7 +867,9 @@ pub(crate) async fn load_aggregate_leaderboard(db: &SqlitePool) -> Result<Vec<Le
         if snapshot.pool_id.is_none() {
             continue;
         }
-        let entry = aggregate.entry(snapshot.agent_version_id).or_insert((0.0, 0, 0, 0, 0, 0));
+        let entry = aggregate
+            .entry(snapshot.agent_version_id)
+            .or_insert((0.0, 0, 0, 0, 0, 0));
         entry.0 += snapshot.rating;
         entry.1 += snapshot.games_played;
         entry.2 += snapshot.wins;
@@ -841,26 +882,30 @@ pub(crate) async fn load_aggregate_leaderboard(db: &SqlitePool) -> Result<Vec<Le
     let mut entries: Vec<_> = all_versions
         .into_iter()
         .map(|version| match aggregate.get(&version.id) {
-            Some((rating_sum, games_played, wins, draws, losses, count)) if *count > 0 => LeaderboardEntry {
-                agent_version_id: version.id,
+            Some((rating_sum, games_played, wins, draws, losses, count)) if *count > 0 => {
+                LeaderboardEntry {
+                    agent_version_id: version.id,
+                    rating: rating_sum / *count as f64,
+                    games_played: *games_played,
+                    wins: *wins,
+                    draws: *draws,
+                    losses: *losses,
+                }
+            }
+            _ => default_entry(version.id),
+        })
+        .collect();
+    entries.push(match aggregate.get(&human_id) {
+        Some((rating_sum, games_played, wins, draws, losses, count)) if *count > 0 => {
+            LeaderboardEntry {
+                agent_version_id: human_id,
                 rating: rating_sum / *count as f64,
                 games_played: *games_played,
                 wins: *wins,
                 draws: *draws,
                 losses: *losses,
-            },
-            _ => default_entry(version.id),
-        })
-        .collect();
-    entries.push(match aggregate.get(&human_id) {
-        Some((rating_sum, games_played, wins, draws, losses, count)) if *count > 0 => LeaderboardEntry {
-            agent_version_id: human_id,
-            rating: rating_sum / *count as f64,
-            games_played: *games_played,
-            wins: *wins,
-            draws: *draws,
-            losses: *losses,
-        },
+            }
+        }
         _ => default_entry(human_id),
     });
     entries.sort_by(|a, b| {
@@ -880,7 +925,8 @@ pub(crate) async fn ensure_human_player(db: &SqlitePool) -> Result<HumanPlayer, 
         .await?
     {
         return Ok(HumanPlayer {
-            id: Uuid::parse_str(&row.get::<String, _>("id")).map_err(|err| ApiError::Internal(err.into()))?,
+            id: Uuid::parse_str(&row.get::<String, _>("id"))
+                .map_err(|err| ApiError::Internal(err.into()))?,
             name: row.get("name"),
             created_at: parse_ts(row.get("created_at"))?,
         });
@@ -900,7 +946,10 @@ pub(crate) async fn ensure_human_player(db: &SqlitePool) -> Result<HumanPlayer, 
     Ok(player)
 }
 
-pub(crate) async fn load_human_profile(db: &SqlitePool, player: &HumanPlayer) -> Result<HumanPlayerProfile, ApiError> {
+pub(crate) async fn load_human_profile(
+    db: &SqlitePool,
+    player: &HumanPlayer,
+) -> Result<HumanPlayerProfile, ApiError> {
     let snapshots = load_rating_history(db, None, Some(player.id)).await?;
     let entry = snapshots.last().cloned().map(|snapshot| LeaderboardEntry {
         agent_version_id: snapshot.agent_version_id,
@@ -982,7 +1031,9 @@ pub(crate) async fn insert_live_runtime_event(
         LiveEventEnvelope::MoveCommitted(value) => {
             (value.match_id, value.seq, LiveEventType::MoveCommitted)
         }
-        LiveEventEnvelope::ClockSync(value) => (value.match_id, value.seq, LiveEventType::ClockSync),
+        LiveEventEnvelope::ClockSync(value) => {
+            (value.match_id, value.seq, LiveEventType::ClockSync)
+        }
         LiveEventEnvelope::GameFinished(value) => {
             (value.match_id, value.seq, LiveEventType::GameFinished)
         }
@@ -1022,7 +1073,9 @@ pub(crate) async fn list_live_runtime_checkpoints(
     rows.into_iter()
         .map(live_runtime_checkpoint_from_row)
         .filter(|result| match result {
-            Ok(checkpoint) => status.map(|value| checkpoint.status == value).unwrap_or(true),
+            Ok(checkpoint) => status
+                .map(|value| checkpoint.status == value)
+                .unwrap_or(true),
             Err(_) => true,
         })
         .collect()
@@ -1043,6 +1096,123 @@ pub(crate) async fn load_live_runtime_events_since(
     rows.into_iter()
         .map(|row| decode_json(&row.get::<String, _>("payload")))
         .collect()
+}
+
+pub(crate) async fn insert_request_journal_entry(
+    db: &SqlitePool,
+    entry: &RequestJournalEntry,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT OR REPLACE INTO request_journal (
+            request_id, client_action_id, client_route, client_ts, method, route, status_code, match_id, tournament_id, game_id, started_at, completed_at, duration_ms, error_text
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(entry.request_id.to_string())
+    .bind(entry.client_action_id.map(|value| value.to_string()))
+    .bind(&entry.client_route)
+    .bind(&entry.client_ts)
+    .bind(&entry.method)
+    .bind(&entry.route)
+    .bind(i64::from(entry.status_code))
+    .bind(entry.match_id.map(|value| value.to_string()))
+    .bind(entry.tournament_id.map(|value| value.to_string()))
+    .bind(entry.game_id.map(|value| value.to_string()))
+    .bind(ts(entry.started_at))
+    .bind(ts(entry.completed_at))
+    .bind(entry.duration_ms)
+    .bind(&entry.error_text)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn get_request_journal_entry(
+    db: &SqlitePool,
+    request_id: Uuid,
+) -> Result<Option<RequestJournalEntry>> {
+    let row = sqlx::query("SELECT * FROM request_journal WHERE request_id = ?")
+        .bind(request_id.to_string())
+        .fetch_optional(db)
+        .await?;
+    row.map(request_journal_from_row).transpose()
+}
+
+pub(crate) async fn list_request_journal_for_entities(
+    db: &SqlitePool,
+    match_id: Option<Uuid>,
+    tournament_id: Option<Uuid>,
+    game_id: Option<Uuid>,
+    limit: usize,
+) -> Result<Vec<RequestJournalEntry>> {
+    let rows = sqlx::query("SELECT * FROM request_journal ORDER BY completed_at DESC")
+        .fetch_all(db)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(request_journal_from_row)
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|entry| {
+            match_id
+                .map(|value| entry.match_id == Some(value))
+                .unwrap_or(false)
+                || tournament_id
+                    .map(|value| entry.tournament_id == Some(value))
+                    .unwrap_or(false)
+                || game_id
+                    .map(|value| entry.game_id == Some(value))
+                    .unwrap_or(false)
+        })
+        .take(limit)
+        .collect())
+}
+
+pub(crate) async fn list_recent_request_errors(
+    db: &SqlitePool,
+    limit: usize,
+) -> Result<Vec<RequestJournalEntry>> {
+    let rows = sqlx::query("SELECT * FROM request_journal ORDER BY completed_at DESC")
+        .fetch_all(db)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(request_journal_from_row)
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|entry| entry.status_code >= 400 || entry.error_text.is_some())
+        .take(limit)
+        .collect())
+}
+
+fn request_journal_from_row(row: sqlx::sqlite::SqliteRow) -> Result<RequestJournalEntry> {
+    Ok(RequestJournalEntry {
+        request_id: Uuid::parse_str(&row.get::<String, _>("request_id"))?,
+        client_action_id: row
+            .get::<Option<String>, _>("client_action_id")
+            .map(|value| Uuid::parse_str(&value))
+            .transpose()?,
+        client_route: row.get("client_route"),
+        client_ts: row.get("client_ts"),
+        method: row.get("method"),
+        route: row.get("route"),
+        status_code: row.get::<i64, _>("status_code") as u16,
+        match_id: row
+            .get::<Option<String>, _>("match_id")
+            .map(|value| Uuid::parse_str(&value))
+            .transpose()?,
+        tournament_id: row
+            .get::<Option<String>, _>("tournament_id")
+            .map(|value| Uuid::parse_str(&value))
+            .transpose()?,
+        game_id: row
+            .get::<Option<String>, _>("game_id")
+            .map(|value| Uuid::parse_str(&value))
+            .transpose()?,
+        started_at: parse_ts(row.get("started_at"))?,
+        completed_at: parse_ts(row.get("completed_at"))?,
+        duration_ms: row.get("duration_ms"),
+        error_text: row.get("error_text"),
+    })
 }
 
 fn live_runtime_checkpoint_from_row(row: sqlx::sqlite::SqliteRow) -> Result<LiveRuntimeCheckpoint> {

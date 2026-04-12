@@ -1,6 +1,20 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useState, useSyncExternalStore } from "react";
 
 import { apiUrl, fetchJson } from "./app/api";
+import {
+  buildDebugReportPackage,
+  clipboardDebugReportSummary,
+  suggestedDebugReportFilename
+} from "./app/debug-report";
+import {
+  createClientActionId,
+  getDebugState,
+  setDebugEnabled,
+  setUiDebugState,
+  subscribeDebug,
+  syncRouteDebugState,
+  toggleDebugEnabled
+} from "./app/debug";
 import { useConfirmedLiveMatch } from "./app/live";
 import {
   BoardView,
@@ -101,6 +115,7 @@ export default function App() {
       return "";
     }
   });
+  const debugState = useSyncExternalStore(subscribeDebug, getDebugState, getDebugState);
 
   const route = parseRoute(locationHash);
   const activeView = route.page === "app" ? route.view : route.page === "engine" ? "setup" : "live_duel";
@@ -301,6 +316,29 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    syncRouteDebugState();
+  }, [locationHash]);
+
+  useEffect(() => {
+    const enableFromFlag =
+      window.location.search.includes("debug=1") || window.location.hash.includes("debug=1");
+    if (enableFromFlag) {
+      setDebugEnabled(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "d") {
+        event.preventDefault();
+        toggleDebugEnabled();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
 
     const loadArena = async (silent = false) => {
@@ -359,6 +397,39 @@ export default function App() {
       setError(confirmedLiveMatch.error);
     }
   }, [confirmedLiveMatch.error]);
+
+  useEffect(() => {
+    setUiDebugState({
+      route: `${window.location.pathname}${window.location.search}${window.location.hash || "#/"}`,
+      selected_match_id:
+        selectedLiveMatchId || (route.page === "watch" ? route.matchId : "") || undefined,
+      selected_tournament_id: selectedLiveMatch?.tournament_id ?? rawLiveGame?.tournament_id,
+      selected_game_id: selectedGameId || replay?.id,
+      current_snapshot_seq: confirmedLiveSnapshot?.seq,
+      current_live_status: confirmedLiveSnapshot?.status,
+      live_summary: confirmedLiveSnapshot
+        ? `seq ${confirmedLiveSnapshot.seq} ${confirmedLiveSnapshot.status} ${confirmedLiveSnapshot.side_to_move}`
+        : rawLiveGame
+          ? `${rawLiveGame.status} ${rawLiveGame.moves_uci.length} moves`
+          : undefined,
+      last_ui_error: error || undefined
+    });
+  }, [
+    locationHash,
+    route.page,
+    route.page === "watch" ? route.matchId : "",
+    selectedLiveMatchId,
+    selectedLiveMatch?.tournament_id,
+    rawLiveGame?.tournament_id,
+    selectedGameId,
+    replay?.id,
+    confirmedLiveSnapshot?.seq,
+    confirmedLiveSnapshot?.status,
+    confirmedLiveSnapshot?.side_to_move,
+    rawLiveGame?.status,
+    rawLiveGame?.moves_uci.length,
+    error
+  ]);
 
   useEffect(() => {
     if (route.page === "watch" && route.matchId && route.matchId !== selectedLiveMatchId) {
@@ -506,20 +577,24 @@ export default function App() {
   }
 
   async function startEventPreset(id: string) {
+    const clientActionId = createClientActionId();
     await withRefresh(async () => {
-      await fetchJson(`/event-presets/${id}/start`, { method: "POST" });
+      await fetchJson(`/event-presets/${id}/start`, { method: "POST", debug: { clientActionId } });
       navigateToView("events");
     }, "Event started. Live results refresh automatically.");
   }
 
   async function loadReplay(id: string) {
+    const clientActionId = createClientActionId();
     navigateToView("replay");
     setSelectedGameId(id);
     setSelectedPly(0);
     setReplay(null);
     setError("");
     try {
-      const replayResponse = await fetchJson<ReplayPayload>(`/games/${id}/replay`);
+      const replayResponse = await fetchJson<ReplayPayload>(`/games/${id}/replay`, {
+        debug: { clientActionId }
+      });
       setReplay(replayResponse);
     } catch (loadError) {
       setError(loadErrorMessage(loadError));
@@ -548,6 +623,7 @@ export default function App() {
 
   async function submitLiveDuel(event: FormEvent) {
     event.preventDefault();
+    const clientActionId = createClientActionId();
 
     if (!duelWhiteId || !duelBlackId) {
       setNotice("");
@@ -568,6 +644,7 @@ export default function App() {
     await withRefresh(async () => {
       const response = await fetchJson<{ tournament_id: string }>("/duels", {
         method: "POST",
+        debug: { clientActionId },
         body: JSON.stringify({
           name,
           pool_id: duelPoolId,
@@ -587,6 +664,7 @@ export default function App() {
 
   async function submitHumanGame(event: FormEvent) {
     event.preventDefault();
+    const clientActionId = createClientActionId();
 
     if (!humanPoolId || !humanEngineId) {
       setNotice("");
@@ -600,6 +678,7 @@ export default function App() {
     await withRefresh(async () => {
       const response = await fetchJson<{ match_id: string }>("/human-games", {
         method: "POST",
+        debug: { clientActionId },
         body: JSON.stringify({
           name: chosenName,
           pool_id: humanPoolId,
@@ -627,6 +706,69 @@ export default function App() {
       setError(loadErrorMessage(moveError));
     } finally {
       setIsSubmittingHumanMove(false);
+    }
+  }
+
+  async function copyDebugBundle() {
+    const frontendBundle = getDebugState();
+    const targetGameId = replay?.id || selectedGameId || undefined;
+    const targetMatchId = selectedLiveMatchId || (route.page === "watch" ? route.matchId : "") || undefined;
+    const targetTournamentId = selectedLiveMatch?.tournament_id ?? rawLiveGame?.tournament_id;
+    const clientActionId = createClientActionId();
+    let backendBundle: unknown = null;
+    let backendError = "";
+
+    try {
+      if (targetGameId) {
+        backendBundle = await fetchJson(`/debug/games/${targetGameId}/bundle`, {
+          debug: { clientActionId }
+        });
+      } else if (targetMatchId) {
+        backendBundle = await fetchJson(`/debug/matches/${targetMatchId}/bundle`, {
+          debug: { clientActionId }
+        });
+      } else if (targetTournamentId) {
+        backendBundle = await fetchJson(`/debug/tournaments/${targetTournamentId}/bundle`, {
+          debug: { clientActionId }
+        });
+      }
+    } catch (bundleError) {
+      backendError = loadErrorMessage(bundleError);
+    }
+
+    const report = buildDebugReportPackage(
+      {
+        ...frontendBundle,
+        retained_failure_reason:
+          backendError && !frontendBundle.retained_failure_reason
+            ? `Backend debug bundle fetch failed: ${backendError}`
+            : frontendBundle.retained_failure_reason
+      },
+      backendBundle
+    );
+
+    try {
+      const saveResponse = await fetchJson<{ path: string }>(`/debug/reports`, {
+        method: "POST",
+        debug: { clientActionId },
+        body: JSON.stringify({
+          preferred_filename: suggestedDebugReportFilename(report),
+          report
+        })
+      });
+      await navigator.clipboard.writeText(clipboardDebugReportSummary(saveResponse.path, report));
+      setNotice(
+        backendError
+          ? `Debug report saved to ${saveResponse.path}. Backend bundle fetch still failed: ${backendError}`
+          : `Debug report saved to ${saveResponse.path} and summary copied.`
+      );
+    } catch (saveError) {
+      const fallbackBundle = {
+        summary: `Frontend route ${frontendBundle.route}${backendError ? ` | backend bundle unavailable: ${backendError}` : ""}`,
+        report
+      };
+      await navigator.clipboard.writeText(JSON.stringify(fallbackBundle, null, 2));
+      setNotice(`Debug report save failed: ${loadErrorMessage(saveError)}. Copied JSON bundle instead.`);
     }
   }
 
@@ -671,6 +813,81 @@ export default function App() {
     void submitHumanMove(`${selectedBoardSquare}${square}${maybePromotion(selectedBoardSquare, square, fromPiece)}`);
   }
 
+  const debugDrawer = debugState.enabled ? (
+    <aside className="panel debug-drawer">
+      <div className="panel-header">
+        <h2>Debug Drawer</h2>
+        <span>Ctrl+Shift+D</span>
+      </div>
+      <div className="stack debug-drawer-copy">
+        <div className="result-strip">
+          <strong>Route</strong>
+          <span>{debugState.route}</span>
+        </div>
+        <div className="result-strip">
+          <strong>IDs</strong>
+          <span>
+            match {debugState.selected_match_id ?? "n/a"} • tournament {debugState.selected_tournament_id ?? "n/a"} •
+            game {debugState.selected_game_id ?? "n/a"}
+          </span>
+        </div>
+        <div className="result-strip">
+          <strong>Live</strong>
+          <span>
+            {debugState.ws_connected ? "connected" : "disconnected"} • ws {debugState.ws_connection_id ?? "n/a"} • seq{" "}
+            {debugState.current_snapshot_seq ?? "n/a"}
+          </span>
+        </div>
+        <div className="result-strip">
+          <strong>Last UI Error</strong>
+          <span>{debugState.last_ui_error ?? "none"}</span>
+        </div>
+        <div className="result-strip">
+          <strong>Retained Failure</strong>
+          <span>{debugState.retained_failure_reason ?? "none"}</span>
+        </div>
+        <div className="result-strip">
+          <strong>Summary</strong>
+          <span>{debugState.live_summary ?? "no live summary"}</span>
+        </div>
+        <button type="button" onClick={() => void copyDebugBundle()}>
+          Export Debug Report
+        </button>
+        <div className="section-heading">Recent API Requests</div>
+        <div className="table">
+          {debugState.recent_api_requests.map((request) => (
+            <div className="table-row table-row-stack" key={request.request_id}>
+              <div>
+                <strong>
+                  {request.method} {request.path}
+                </strong>
+                <p>
+                  request {request.request_id} • action {request.client_action_id ?? "n/a"}
+                </p>
+              </div>
+              <div className="chip">{request.status_code ?? "..."}</div>
+            </div>
+          ))}
+        </div>
+        <div className="section-heading">Recent Websocket Events</div>
+        <div className="table">
+          {debugState.recent_ws_events.map((event, index) => (
+            <div className="table-row table-row-stack" key={`${event.at}-${event.event}-${index}`}>
+              <div>
+                <strong>{event.event}</strong>
+                <p>
+                  ws {event.ws_connection_id ?? "n/a"} • action {event.client_action_id ?? "n/a"} • intent{" "}
+                  {event.intent_id ?? "n/a"}
+                </p>
+              </div>
+              <div className="chip">{new Date(event.at).toLocaleTimeString()}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </aside>
+  ) : null;
+
   if (route.page === "watch") {
     return (
       <div className="watch-shell">
@@ -701,6 +918,8 @@ export default function App() {
             ) : null}
           </div>
         </header>
+
+        {debugDrawer}
 
         {error && <section className="banner banner-error">{error}</section>}
 
@@ -898,6 +1117,7 @@ export default function App() {
       )}
 
       <main className={`workspace view-${activeView}`}>
+        {debugDrawer}
         {activeView === "overview" && (
           <>
             <section className="panel panel-spotlight">

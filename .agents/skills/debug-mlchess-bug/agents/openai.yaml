@@ -1,0 +1,4 @@
+interface:
+  display_name: "Debug MlChess Bug"
+  short_description: "Reproduce, isolate, test, fix, and verify MlChess bugs from bundles or IDs."
+  default_prompt: "Use the MlChess repo bug workflow. Read the active AGENTS.md files and the debug-mlchess-bug skill. Start from the bug report or copied debug bundle, reproduce the issue, add a failing regression test when feasible, make the smallest root-cause fix, run targeted verification, and summarize root cause, changed files, tests, commands, and remaining uncertainty."

@@ -15,8 +15,8 @@ use crate::registry_loader::{
     PoolRegistration, RegistrySnapshot,
 };
 use crate::storage::{
-    list_agent_versions, list_agents, list_event_presets, list_opening_suites, list_pools,
     insert_agent, insert_agent_version, insert_event_preset, insert_opening_suite, insert_pool,
+    list_agent_versions, list_agents, list_event_presets, list_opening_suites, list_pools,
     update_agent, update_agent_version, update_event_preset, update_opening_suite, update_pool,
 };
 
@@ -97,7 +97,9 @@ async fn sync_agents_and_versions(
 
         let existing = existing_versions
             .iter()
-            .find(|version| version.registry_key.as_deref() == Some(definition.registry_key.as_str()))
+            .find(|version| {
+                version.registry_key.as_deref() == Some(definition.registry_key.as_str())
+            })
             .cloned();
 
         let mut version = match &existing {
@@ -215,7 +217,9 @@ async fn sync_opening_suites(
             .cloned();
 
         let mut suite = match &existing {
-            Some(existing) => opening_suite_with_identity(imported, existing.id, existing.created_at),
+            Some(existing) => {
+                opening_suite_with_identity(imported, existing.id, existing.created_at)
+            }
             None => imported,
         };
         suite.active = definition.active;

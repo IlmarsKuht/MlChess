@@ -903,6 +903,15 @@ textarea {
   padding: 1.3rem;
 }
 
+.debug-drawer {
+  margin: 0 0 1rem;
+  border-style: dashed;
+}
+
+.debug-drawer-copy {
+  gap: 0.75rem;
+}
+
 .watch-stage {
   display: grid;
   grid-template-columns: minmax(0, 1.45fr) minmax(340px, 0.9fr);
