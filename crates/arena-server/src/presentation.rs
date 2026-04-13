@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use arena_core::{
-    AgentVersion, GameRecord, GameResult, LeaderboardEntry, MatchSeries, MatchStatus, Variant,
+    AgentVersion, GameRecord, GameResult, LeaderboardEntry, LiveRuntimeCheckpoint, LiveStatus,
+    MatchSeries, MatchStatus, Variant,
 };
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -34,10 +35,20 @@ pub(crate) struct ApiMatchSeries {
     pub(crate) opening_id: Option<Uuid>,
     pub(crate) game_index: u32,
     pub(crate) status: MatchStatus,
+    pub(crate) watch_state: ApiMatchWatchState,
+    pub(crate) game_id: Option<Uuid>,
     pub(crate) created_at: DateTime<Utc>,
     pub(crate) white_participant: ApiParticipant,
     pub(crate) black_participant: ApiParticipant,
     pub(crate) interactive: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ApiMatchWatchState {
+    Live,
+    Replay,
+    Unavailable,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -136,6 +147,9 @@ pub(crate) fn participant_for_id(
 
 pub(crate) fn api_match_series(
     series: &MatchSeries,
+    status: MatchStatus,
+    watch_state: ApiMatchWatchState,
+    game_id: Option<Uuid>,
     version_name_by_id: &HashMap<Uuid, String>,
     human_player: &HumanPlayer,
     interactive: bool,
@@ -149,7 +163,9 @@ pub(crate) fn api_match_series(
         black_version_id: series.black_version_id,
         opening_id: series.opening_id,
         game_index: series.game_index,
-        status: series.status,
+        status,
+        watch_state,
+        game_id,
         created_at: series.created_at,
         white_participant: participant_for_id(
             series.white_version_id,
@@ -163,6 +179,48 @@ pub(crate) fn api_match_series(
         ),
         interactive,
     }
+}
+
+pub(crate) fn resolve_match_lifecycle(
+    series: &MatchSeries,
+    game_id: Option<Uuid>,
+    checkpoint: Option<&LiveRuntimeCheckpoint>,
+) -> (MatchStatus, ApiMatchWatchState, Option<Uuid>) {
+    if let Some(game_id) = game_id {
+        return (
+            MatchStatus::Completed,
+            ApiMatchWatchState::Replay,
+            Some(game_id),
+        );
+    }
+
+    if let Some(checkpoint) = checkpoint {
+        return match checkpoint.status {
+            LiveStatus::Finished => (
+                MatchStatus::Completed,
+                if game_id.is_some() {
+                    ApiMatchWatchState::Replay
+                } else {
+                    ApiMatchWatchState::Unavailable
+                },
+                game_id,
+            ),
+            LiveStatus::Aborted => (
+                MatchStatus::Failed,
+                ApiMatchWatchState::Unavailable,
+                game_id,
+            ),
+            LiveStatus::Running => (MatchStatus::Running, ApiMatchWatchState::Live, game_id),
+        };
+    }
+
+    let watch_state = match series.status {
+        MatchStatus::Completed => ApiMatchWatchState::Replay,
+        MatchStatus::Running => ApiMatchWatchState::Unavailable,
+        MatchStatus::Failed | MatchStatus::Skipped => ApiMatchWatchState::Unavailable,
+        MatchStatus::Pending => ApiMatchWatchState::Unavailable,
+    };
+    (series.status, watch_state, game_id)
 }
 
 pub(crate) fn api_game_record(

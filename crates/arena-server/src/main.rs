@@ -1,7 +1,7 @@
 use std::{env, path::PathBuf};
 
 use anyhow::Result;
-use arena_server::run_server;
+use arena_server::{cleanup_stale_match_statuses, run_server};
 use tracing_subscriber::{EnvFilter, fmt};
 
 #[tokio::main]
@@ -17,6 +17,12 @@ async fn main() -> Result<()> {
         .ok()
         .or_else(default_database_url)
         .unwrap_or_else(|| "sqlite://arena.db".to_string());
+    let args: Vec<String> = env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("cleanup-stale-match-statuses") {
+        let updated = cleanup_stale_match_statuses(&db_url).await?;
+        println!("updated {updated} stale match rows");
+        return Ok(());
+    }
     let frontend_dist = env::var("ARENA_FRONTEND_DIST")
         .ok()
         .map(PathBuf::from)

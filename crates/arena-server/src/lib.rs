@@ -28,6 +28,7 @@ use axum::{
 use db::init_db;
 use live::LiveMatchStore;
 use orchestration::{restore_engine_game, restore_human_game};
+use presentation::resolve_match_lifecycle;
 use registry::{SetupRegistryCache, sync_setup_registry_if_changed};
 use serde_json::{Value, json};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -113,6 +114,48 @@ pub async fn run_server(
     info!("arena server listening on http://{bind_addr}");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+pub async fn cleanup_stale_match_statuses(db_url: &str) -> Result<u64> {
+    let db_options = db_url
+        .parse::<SqliteConnectOptions>()
+        .with_context(|| format!("failed to parse sqlite connection string {db_url}"))?
+        .create_if_missing(true)
+        .foreign_keys(true);
+    let db = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(db_options)
+        .await
+        .with_context(|| format!("failed to connect to {db_url}"))?;
+    sqlx::query("PRAGMA foreign_keys = ON").execute(&db).await?;
+    init_db(&db).await?;
+
+    let match_series = crate::storage::list_match_series(&db, None).await?;
+    let games = crate::storage::list_games(&db, None, None).await?;
+    let checkpoints = crate::storage::list_live_runtime_checkpoints(&db, None).await?;
+    let game_id_by_match_id = games
+        .into_iter()
+        .map(|game| (game.match_id, game.id))
+        .collect::<std::collections::HashMap<_, _>>();
+    let checkpoint_by_match_id = checkpoints
+        .into_iter()
+        .map(|checkpoint| (checkpoint.match_id, checkpoint))
+        .collect::<std::collections::HashMap<_, _>>();
+
+    let mut updated = 0_u64;
+    for series in match_series {
+        let (resolved_status, _, _) = resolve_match_lifecycle(
+            &series,
+            game_id_by_match_id.get(&series.id).copied(),
+            checkpoint_by_match_id.get(&series.id),
+        );
+        if resolved_status == series.status {
+            continue;
+        }
+        crate::storage::update_match_series_status(&db, series.id, resolved_status).await?;
+        updated += 1;
+    }
+    Ok(updated)
 }
 
 pub fn build_app(state: AppState) -> Router {
@@ -268,8 +311,6 @@ fn infer_entity_ids(path: &str) -> (Option<Uuid>, Option<Uuid>, Option<Uuid>) {
 }
 
 async fn restore_live_runtime(state: &AppState) -> Result<()> {
-    reconcile_match_series_statuses_from_live_checkpoints(state).await?;
-    reconcile_match_series_statuses_from_finished_games(state).await?;
     let checkpoints =
         crate::storage::list_live_runtime_checkpoints(&state.db, Some(LiveStatus::Running)).await?;
     let human_player = crate::storage::ensure_human_player(&state.db).await?;
@@ -320,78 +361,6 @@ async fn restore_live_runtime(state: &AppState) -> Result<()> {
     Ok(())
 }
 
-async fn reconcile_match_series_statuses_from_live_checkpoints(state: &AppState) -> Result<()> {
-    let checkpoints = crate::storage::list_live_runtime_checkpoints(&state.db, None).await?;
-    for checkpoint in checkpoints {
-        let target_status = match checkpoint.status {
-            LiveStatus::Running => continue,
-            LiveStatus::Finished => arena_core::MatchStatus::Completed,
-            LiveStatus::Aborted => arena_core::MatchStatus::Failed,
-        };
-        let match_series =
-            match crate::storage::get_match_series(&state.db, checkpoint.match_id).await {
-                Ok(value) => value,
-                Err(err) => {
-                    warn!(
-                        match_id = %checkpoint.match_id,
-                        "failed to reconcile restored live match status: {err}"
-                    );
-                    continue;
-                }
-            };
-        if !matches!(
-            match_series.status,
-            arena_core::MatchStatus::Pending | arena_core::MatchStatus::Running
-        ) {
-            continue;
-        }
-        if match_series.status == target_status {
-            continue;
-        }
-        crate::storage::update_match_series_status(&state.db, checkpoint.match_id, target_status)
-            .await?;
-        info!(
-            match_id = %checkpoint.match_id,
-            previous_status = ?match_series.status,
-            reconciled_status = ?target_status,
-            live_status = ?checkpoint.status,
-            "reconciled stale match status from live checkpoint"
-        );
-    }
-    Ok(())
-}
-
-async fn reconcile_match_series_statuses_from_finished_games(state: &AppState) -> Result<()> {
-    let match_series = crate::storage::list_match_series(&state.db, None).await?;
-    let games = crate::storage::list_games(&state.db, None, None).await?;
-    let completed_match_ids: std::collections::HashSet<_> =
-        games.into_iter().map(|game| game.match_id).collect();
-    for series in match_series {
-        if !matches!(
-            series.status,
-            arena_core::MatchStatus::Pending | arena_core::MatchStatus::Running
-        ) {
-            continue;
-        }
-        if !completed_match_ids.contains(&series.id) {
-            continue;
-        }
-        crate::storage::update_match_series_status(
-            &state.db,
-            series.id,
-            arena_core::MatchStatus::Completed,
-        )
-        .await?;
-        info!(
-            match_id = %series.id,
-            previous_status = ?series.status,
-            reconciled_status = ?arena_core::MatchStatus::Completed,
-            "reconciled stale match status from persisted game record"
-        );
-    }
-    Ok(())
-}
-
 async fn fail_closed_live_match(
     state: &AppState,
     match_series: &arena_core::MatchSeries,
@@ -403,30 +372,34 @@ async fn fail_closed_live_match(
     checkpoint.termination = LiveTermination::Abort;
     checkpoint.side_to_move = ProtocolLiveSide::None;
     checkpoint.updated_at = chrono::Utc::now();
-    live::publish_with_metrics(
-        &state.live_matches,
-        &state.db,
-        Some(&state.live_metrics),
-        checkpoint.clone(),
-        arena_core::LiveEventEnvelope::GameFinished(live::game_finished_from_checkpoint(
-            &checkpoint,
-        )),
-    )
-    .await?;
-    crate::storage::update_match_series_status(
-        &state.db,
+    let event = arena_core::LiveEventEnvelope::GameFinished(live::game_finished_from_checkpoint(
+        &checkpoint,
+    ));
+    let mut tx = state.db.begin().await?;
+    crate::storage::upsert_live_runtime_checkpoint_tx(&mut tx, &checkpoint).await?;
+    crate::storage::insert_live_runtime_event_tx(&mut tx, &event).await?;
+    crate::storage::update_match_series_status_tx(
+        &mut tx,
         match_series.id,
         arena_core::MatchStatus::Failed,
     )
     .await?;
-    crate::storage::update_tournament_status(
-        &state.db,
+    crate::storage::update_tournament_status_tx(
+        &mut tx,
         match_series.tournament_id,
         arena_core::TournamentStatus::Failed,
         None,
         Some(chrono::Utc::now()),
     )
     .await?;
+    tx.commit().await?;
+    live::publish_transient_with_metrics(
+        &state.live_matches,
+        Some(&state.live_metrics),
+        checkpoint,
+        event,
+    )
+    .await;
     Ok(())
 }
 
@@ -835,10 +808,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restore_live_runtime_reconciles_finished_checkpoint_match_status() {
+    async fn cleanup_stale_match_statuses_updates_finished_match_rows() {
+        let temp_path = std::env::temp_dir().join(format!("mlchess-cleanup-{}.db", Uuid::new_v4()));
+        let db_path = temp_path.to_string_lossy().replace('\\', "/");
+        let db_url = if db_path.starts_with('/') {
+            format!("sqlite://{db_path}")
+        } else {
+            format!("sqlite:///{db_path}")
+        };
+        let db_options = db_url
+            .parse::<SqliteConnectOptions>()
+            .unwrap()
+            .create_if_missing(true)
+            .foreign_keys(true);
         let db = SqlitePoolOptions::new()
             .max_connections(1)
-            .connect("sqlite::memory:")
+            .connect_with(db_options)
             .await
             .unwrap();
         init_db(&db).await.unwrap();
@@ -846,115 +831,14 @@ mod tests {
         sync_setup_registry_if_changed(&db, &setup_registry)
             .await
             .unwrap();
-        let state = AppState {
-            db: db.clone(),
-            coordinator: TournamentCoordinator::default(),
-            live_matches: LiveMatchStore::default(),
-            live_metrics: LiveMetricsStore::default(),
-            human_games: HumanGameStore::default(),
-            debug_reports_dir: std::env::temp_dir().join("mlchess-debug-reports"),
-            frontend_dist: None,
-            setup_registry,
-        };
 
-        let match_id = Uuid::new_v4();
-        let pool_id = list_pools(&db).await.unwrap().remove(0).id;
-        let mut versions = list_agent_versions(&db, None).await.unwrap();
-        let white = versions.remove(0);
-        let black = versions.remove(0);
-        let tournament = Tournament {
-            id: Uuid::new_v4(),
-            name: "finished-restore".to_string(),
-            kind: TournamentKind::RoundRobin,
-            pool_id,
-            participant_version_ids: vec![white.id, black.id],
-            worker_count: 1,
-            games_per_pairing: 1,
-            status: TournamentStatus::Running,
-            created_at: Utc::now(),
-            started_at: Some(Utc::now()),
-            completed_at: None,
-        };
-        crate::storage::insert_tournament(&db, &tournament)
-            .await
-            .unwrap();
-        crate::storage::insert_match_series(
-            &db,
-            &MatchSeries {
-                id: match_id,
-                tournament_id: tournament.id,
-                pool_id,
-                round_index: 12,
-                white_version_id: white.id,
-                black_version_id: black.id,
-                opening_id: None,
-                game_index: 0,
-                status: MatchStatus::Running,
-                created_at: Utc::now(),
-            },
-        )
-        .await
-        .unwrap();
-        crate::storage::upsert_live_runtime_checkpoint(
-            &db,
-            &arena_core::LiveRuntimeCheckpoint {
-                match_id,
-                seq: 57,
-                status: LiveStatus::Finished,
-                result: arena_core::LiveResult::WhiteWin,
-                termination: arena_core::LiveTermination::EngineFailure,
-                fen: "4r1k1/pp2rp1p/2pbn2q/Q2p4/3P4/1R1BP2P/PPP2PP1/1R5K w - - 0 29".to_string(),
-                moves: vec!["e1a5".to_string()],
-                white_remaining_ms: 22_000,
-                black_remaining_ms: 22_000,
-                side_to_move: arena_core::ProtocolLiveSide::None,
-                turn_started_server_unix_ms: Utc::now().timestamp_millis(),
-                updated_at: Utc::now(),
-            },
-        )
-        .await
-        .unwrap();
-
-        restore_live_runtime(&state).await.unwrap();
-
-        let match_series = crate::storage::get_match_series(&db, match_id)
-            .await
-            .unwrap();
-        assert_eq!(match_series.status, MatchStatus::Completed);
-        assert!(state.live_matches.get_snapshot(match_id).await.is_none());
-    }
-
-    #[tokio::test]
-    async fn restore_live_runtime_reconciles_finished_game_without_live_checkpoint() {
-        let db = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .unwrap();
-        init_db(&db).await.unwrap();
-        let setup_registry = SetupRegistryCache::default();
-        sync_setup_registry_if_changed(&db, &setup_registry)
-            .await
-            .unwrap();
-        let state = AppState {
-            db: db.clone(),
-            coordinator: TournamentCoordinator::default(),
-            live_matches: LiveMatchStore::default(),
-            live_metrics: LiveMetricsStore::default(),
-            human_games: HumanGameStore::default(),
-            debug_reports_dir: std::env::temp_dir().join("mlchess-debug-reports"),
-            frontend_dist: None,
-            setup_registry,
-        };
-
-        let match_id = Uuid::new_v4();
         let pool = list_pools(&db).await.unwrap().remove(0);
         let mut versions = list_agent_versions(&db, None).await.unwrap();
         let white = versions.remove(0);
         let black = versions.remove(0);
         let tournament = Tournament {
             id: Uuid::new_v4(),
-            name: "game-only-restore".to_string(),
+            name: "cleanup".to_string(),
             kind: TournamentKind::RoundRobin,
             pool_id: pool.id,
             participant_version_ids: vec![white.id, black.id],
@@ -965,13 +849,13 @@ mod tests {
             started_at: Some(Utc::now()),
             completed_at: Some(Utc::now()),
         };
-        crate::storage::insert_tournament(&db, &tournament)
-            .await
-            .unwrap();
-        crate::storage::insert_match_series(
+        insert_tournament(&db, &tournament).await.unwrap();
+
+        let game_only_match_id = Uuid::new_v4();
+        insert_match_series(
             &db,
             &MatchSeries {
-                id: match_id,
+                id: game_only_match_id,
                 tournament_id: tournament.id,
                 pool_id: pool.id,
                 round_index: 2,
@@ -990,7 +874,7 @@ mod tests {
             &GameRecord {
                 id: Uuid::new_v4(),
                 tournament_id: tournament.id,
-                match_id,
+                match_id: game_only_match_id,
                 pool_id: pool.id,
                 variant: pool.variant,
                 opening_id: None,
@@ -1011,12 +895,61 @@ mod tests {
         .await
         .unwrap();
 
-        restore_live_runtime(&state).await.unwrap();
+        let checkpoint_match_id = Uuid::new_v4();
+        insert_match_series(
+            &db,
+            &MatchSeries {
+                id: checkpoint_match_id,
+                tournament_id: tournament.id,
+                pool_id: pool.id,
+                round_index: 3,
+                white_version_id: white.id,
+                black_version_id: black.id,
+                opening_id: None,
+                game_index: 1,
+                status: MatchStatus::Running,
+                created_at: Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+        crate::storage::upsert_live_runtime_checkpoint(
+            &db,
+            &arena_core::LiveRuntimeCheckpoint {
+                match_id: checkpoint_match_id,
+                seq: 57,
+                status: LiveStatus::Finished,
+                result: arena_core::LiveResult::WhiteWin,
+                termination: arena_core::LiveTermination::EngineFailure,
+                fen: "4r1k1/pp2rp1p/2pbn2q/Q2p4/3P4/1R1BP2P/PPP2PP1/1R5K w - - 0 29".to_string(),
+                moves: vec!["e1a5".to_string()],
+                white_remaining_ms: 22_000,
+                black_remaining_ms: 22_000,
+                side_to_move: arena_core::ProtocolLiveSide::None,
+                turn_started_server_unix_ms: Utc::now().timestamp_millis(),
+                updated_at: Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
 
-        let match_series = crate::storage::get_match_series(&db, match_id)
-            .await
-            .unwrap();
-        assert_eq!(match_series.status, MatchStatus::Completed);
-        assert!(state.live_matches.get_snapshot(match_id).await.is_none());
+        let updated = cleanup_stale_match_statuses(&db_url).await.unwrap();
+        assert_eq!(updated, 2);
+        assert_eq!(
+            crate::storage::get_match_series(&db, game_only_match_id)
+                .await
+                .unwrap()
+                .status,
+            MatchStatus::Completed
+        );
+        assert_eq!(
+            crate::storage::get_match_series(&db, checkpoint_match_id)
+                .await
+                .unwrap()
+                .status,
+            MatchStatus::Completed
+        );
+
+        let _ = std::fs::remove_file(temp_path);
     }
 }

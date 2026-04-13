@@ -3,6 +3,7 @@ import { Chess } from "chess.js";
 import type {
   BoardMoveMarker,
   GameResult,
+  MatchSeries,
   Participant,
   ReplayPayload,
   RouteState,
@@ -14,6 +15,7 @@ import type {
 
 export const liveRevealDelayMs = 600;
 export const lastWatchedKey = "arena:last-watched-match";
+export const pendingLiveWatchWindowMs = 15_000;
 
 export function buildFrames(variant: Variant, startFen: string, movesUci: string[]) {
   if (variant !== "standard") {
@@ -118,6 +120,19 @@ export function liveClockElapsedMs(options: {
     return 0;
   }
   return Math.max(0, liveNowMs - turnStartedServerUnixMs);
+}
+
+export function isPendingLiveWatchMatch(match: MatchSeries, nowMs = Date.now()) {
+  if (match.status !== "running" || match.watch_state !== "unavailable") {
+    return false;
+  }
+
+  const createdAtMs = new Date(match.created_at).getTime();
+  if (!Number.isFinite(createdAtMs)) {
+    return false;
+  }
+
+  return Math.max(0, nowMs - createdAtMs) <= pendingLiveWatchWindowMs;
 }
 
 export function formatRelativeTime(timestamp: number) {

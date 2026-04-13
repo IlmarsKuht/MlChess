@@ -20,7 +20,7 @@ use arena_runner::{
 };
 use chrono::Utc;
 use serde_json::json;
-use sqlx::SqlitePool;
+use sqlx::{Sqlite, SqlitePool, Transaction};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -42,12 +42,19 @@ use crate::{
     storage::{
         ensure_agent_version_exists, ensure_human_player, ensure_leaderboard_seed,
         ensure_pool_exists, get_agent_version, get_match_series, get_pool, get_tournament,
-        insert_game, insert_human_game, insert_human_rating_snapshot, insert_match_series,
-        insert_rating_snapshot, insert_tournament, list_agent_versions, list_agent_versions_by_ids,
-        load_human_profile, load_pool_leaderboard, load_pool_openings, update_match_series_status,
-        update_tournament_status,
+        insert_game_tx, insert_human_game_tx, insert_human_rating_snapshot,
+        insert_live_runtime_event_tx, insert_match_series, insert_rating_snapshot,
+        insert_tournament, list_agent_versions, list_agent_versions_by_ids, load_human_profile,
+        load_pool_leaderboard, load_pool_openings, update_match_series_status,
+        update_match_series_status_tx, update_tournament_status, update_tournament_status_tx,
+        upsert_live_runtime_checkpoint_tx,
     },
 };
+
+enum CompletedGameTable {
+    Engine,
+    Human,
+}
 
 fn push_runtime_log(logs: &mut Vec<GameLogEntry>, entry: GameLogEntry) {
     logs.push(entry);
@@ -655,6 +662,43 @@ pub(crate) async fn create_tournament_run(
     Ok(tournament)
 }
 
+async fn persist_terminal_match_state(
+    state: &AppState,
+    completed_game_table: CompletedGameTable,
+    game: &GameRecord,
+    match_status: MatchStatus,
+    tournament_status: TournamentStatus,
+    tournament_started_at: chrono::DateTime<Utc>,
+    checkpoint: LiveRuntimeCheckpoint,
+    event: arena_core::LiveEventEnvelope,
+) -> Result<(), ApiError> {
+    let mut tx: Transaction<'_, Sqlite> = state.db.begin().await?;
+    match completed_game_table {
+        CompletedGameTable::Engine => insert_game_tx(&mut tx, game).await?,
+        CompletedGameTable::Human => insert_human_game_tx(&mut tx, game).await?,
+    }
+    update_match_series_status_tx(&mut tx, game.match_id, match_status).await?;
+    update_tournament_status_tx(
+        &mut tx,
+        game.tournament_id,
+        tournament_status,
+        Some(tournament_started_at),
+        Some(game.completed_at),
+    )
+    .await?;
+    upsert_live_runtime_checkpoint_tx(&mut tx, &checkpoint).await?;
+    insert_live_runtime_event_tx(&mut tx, &event).await?;
+    tx.commit().await?;
+    publish_transient_with_metrics(
+        &state.live_matches,
+        Some(&state.live_metrics),
+        checkpoint,
+        event,
+    )
+    .await;
+    Ok(())
+}
+
 async fn finalize_human_game(
     state: AppState,
     session: HumanGameSession,
@@ -666,10 +710,12 @@ async fn finalize_human_game(
     runtime.logs = shutdown_logs;
     let final_log = human_runtime_log(&session, &runtime, "game.finalized", "human game finalized");
     push_runtime_log(&mut runtime.logs, final_log);
+    runtime.seq += 1;
     let result = runtime.result.unwrap_or(GameResult::Draw);
     let termination = runtime
         .termination
         .unwrap_or(arena_core::GameTermination::Unknown);
+    let completed_at = Utc::now();
     let game = GameRecord {
         id: Uuid::new_v4(),
         tournament_id: runtime.tournament_id,
@@ -694,23 +740,27 @@ async fn finalize_human_game(
         black_time_left_ms: runtime.black_time_left_ms,
         logs: runtime.logs.clone(),
         started_at: runtime.started_at,
-        completed_at: Utc::now(),
+        completed_at,
     };
-    insert_human_game(&state.db, &game).await?;
+    let checkpoint = human_checkpoint(&session, &runtime);
+    let event =
+        arena_core::LiveEventEnvelope::GameFinished(game_finished_from_checkpoint(&checkpoint));
+    persist_terminal_match_state(
+        &state,
+        CompletedGameTable::Human,
+        &game,
+        runtime.status,
+        TournamentStatus::Completed,
+        runtime.started_at,
+        checkpoint,
+        event,
+    )
+    .await?;
     apply_human_pool_rating_update(
         &state.db,
         session.match_series.pool_id,
         &game,
         &session.human_player,
-    )
-    .await?;
-    update_match_series_status(&state.db, session.match_series.id, runtime.status).await?;
-    update_tournament_status(
-        &state.db,
-        runtime.tournament_id,
-        TournamentStatus::Completed,
-        Some(runtime.started_at),
-        Some(Utc::now()),
     )
     .await?;
     Ok(())
@@ -945,7 +995,6 @@ async fn play_server_owned_engine_game(
     mut runtime: EngineMatchRuntime,
     publish_initial_snapshot: bool,
 ) -> Result<GameRecord, ApiError> {
-    let mut terminal_published = false;
     if publish_initial_snapshot {
         publish_engine_runtime(state, &session, &mut runtime, true).await?;
     }
@@ -1151,13 +1200,11 @@ async fn play_server_owned_engine_game(
             runtime.termination = Some(termination);
             runtime.status = MatchStatus::Completed;
         }
-        publish_engine_runtime(state, &session, &mut runtime, false).await?;
-        terminal_published = runtime.status != MatchStatus::Running;
+        if runtime.status == MatchStatus::Running {
+            publish_engine_runtime(state, &session, &mut runtime, false).await?;
+        }
     }
 
-    if runtime.status != MatchStatus::Running && !terminal_published {
-        publish_engine_runtime(state, &session, &mut runtime, false).await?;
-    }
     finalize_engine_game(state, session, runtime).await
 }
 
@@ -1232,14 +1279,15 @@ async fn publish_engine_runtime(
     runtime: &mut EngineMatchRuntime,
     initial: bool,
 ) -> Result<(), ApiError> {
+    if !initial && runtime.status != MatchStatus::Running {
+        return Ok(());
+    }
     runtime.seq += 1;
     let checkpoint = engine_checkpoint(session, runtime);
     let event_name = if initial {
         "live.snapshot"
-    } else if runtime.status == MatchStatus::Running {
-        "live.move_published"
     } else {
-        "game.finalized"
+        "live.move_published"
     };
     let runtime_log_entry = engine_runtime_log(
         session,
@@ -1250,10 +1298,8 @@ async fn publish_engine_runtime(
     push_runtime_log(&mut runtime.logs, runtime_log_entry);
     let event = if initial {
         arena_core::LiveEventEnvelope::Snapshot(snapshot_from_checkpoint(&checkpoint))
-    } else if runtime.status == MatchStatus::Running {
-        arena_core::LiveEventEnvelope::MoveCommitted(move_committed_from_checkpoint(&checkpoint))
     } else {
-        arena_core::LiveEventEnvelope::GameFinished(game_finished_from_checkpoint(&checkpoint))
+        arena_core::LiveEventEnvelope::MoveCommitted(move_committed_from_checkpoint(&checkpoint))
     };
     publish_with_metrics(
         &state.live_matches,
@@ -1310,10 +1356,12 @@ async fn finalize_engine_game(
         "engine game finalized",
     );
     push_runtime_log(&mut runtime.logs, final_log);
+    runtime.seq += 1;
     let result = runtime.result.unwrap_or(GameResult::Draw);
     let termination = runtime
         .termination
         .unwrap_or(arena_core::GameTermination::Unknown);
+    let completed_at = Utc::now();
     let game = GameRecord {
         id: Uuid::new_v4(),
         tournament_id: runtime.tournament_id,
@@ -1338,10 +1386,22 @@ async fn finalize_engine_game(
         black_time_left_ms: runtime.black_time_left_ms,
         logs: runtime.logs.clone(),
         started_at: runtime.started_at,
-        completed_at: Utc::now(),
+        completed_at,
     };
-    insert_game(&state.db, &game).await?;
-    update_match_series_status(&state.db, session.match_series.id, MatchStatus::Completed).await?;
+    let checkpoint = engine_checkpoint(&session, &runtime);
+    let event =
+        arena_core::LiveEventEnvelope::GameFinished(game_finished_from_checkpoint(&checkpoint));
+    persist_terminal_match_state(
+        state,
+        CompletedGameTable::Engine,
+        &game,
+        MatchStatus::Completed,
+        TournamentStatus::Completed,
+        runtime.started_at,
+        checkpoint,
+        event,
+    )
+    .await?;
     Ok(game)
 }
 
@@ -1484,14 +1544,15 @@ async fn publish_human_runtime(
     runtime: &mut HumanGameRuntime,
     initial: bool,
 ) -> Result<(), ApiError> {
+    if !initial && runtime.status != MatchStatus::Running {
+        return Ok(());
+    }
     runtime.seq += 1;
     let checkpoint = human_checkpoint(session, runtime);
     let event_name = if initial {
         "live.snapshot"
-    } else if runtime.status == MatchStatus::Running {
-        "live.move_published"
     } else {
-        "game.finalized"
+        "live.move_published"
     };
     let runtime_log_entry = human_runtime_log(
         session,
@@ -1502,10 +1563,8 @@ async fn publish_human_runtime(
     push_runtime_log(&mut runtime.logs, runtime_log_entry);
     let event = if initial {
         arena_core::LiveEventEnvelope::Snapshot(snapshot_from_checkpoint(&checkpoint))
-    } else if runtime.status == MatchStatus::Running {
-        arena_core::LiveEventEnvelope::MoveCommitted(move_committed_from_checkpoint(&checkpoint))
     } else {
-        arena_core::LiveEventEnvelope::GameFinished(game_finished_from_checkpoint(&checkpoint))
+        arena_core::LiveEventEnvelope::MoveCommitted(move_committed_from_checkpoint(&checkpoint))
     };
     publish_with_metrics(
         &state.live_matches,
@@ -1928,24 +1987,57 @@ mod tests {
         }
     }
 
-    fn session_and_runtime(
+    async fn session_and_runtime(
+        state: &AppState,
         engine_side: cozy_chess::Color,
         human_plays_white: bool,
     ) -> (HumanGameSession, HumanGameRuntime) {
+        let pool = crate::storage::list_pools(&state.db)
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let engine_version = list_agent_versions(&state.db, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|version| version.id != Uuid::from_u128(1))
+            .unwrap();
+        let human_player = ensure_human_player(&state.db).await.unwrap();
+        let tournament_id = Uuid::new_v4();
+        insert_tournament(
+            &state.db,
+            &Tournament {
+                id: tournament_id,
+                name: "test".to_string(),
+                kind: TournamentKind::RoundRobin,
+                pool_id: pool.id,
+                participant_version_ids: vec![human_player.id, engine_version.id],
+                worker_count: 1,
+                games_per_pairing: 1,
+                status: TournamentStatus::Running,
+                created_at: Utc::now(),
+                started_at: Some(Utc::now()),
+                completed_at: None,
+            },
+        )
+        .await
+        .unwrap();
         let match_series = MatchSeries {
             id: Uuid::new_v4(),
-            tournament_id: Uuid::new_v4(),
-            pool_id: Uuid::new_v4(),
+            tournament_id,
+            pool_id: pool.id,
             round_index: 0,
             white_version_id: if human_plays_white {
-                Uuid::from_u128(1)
+                human_player.id
             } else {
-                Uuid::new_v4()
+                engine_version.id
             },
             black_version_id: if human_plays_white {
-                Uuid::new_v4()
+                engine_version.id
             } else {
-                Uuid::from_u128(1)
+                human_player.id
             },
             opening_id: None,
             game_index: 0,
@@ -1956,11 +2048,7 @@ mod tests {
         let session = HumanGameSession {
             name: "test".to_string(),
             match_series: match_series.clone(),
-            human_player: HumanPlayer {
-                id: Uuid::from_u128(1),
-                name: "You".to_string(),
-                created_at: Utc::now(),
-            },
+            human_player,
             command_tx,
         };
         let board = cozy_chess::Board::default();
@@ -1999,7 +2087,8 @@ mod tests {
     #[tokio::test]
     async fn human_move_times_out_when_elapsed_exceeds_remaining_clock() {
         let state = test_state().await;
-        let (session, mut runtime) = session_and_runtime(cozy_chess::Color::Black, true);
+        let (session, mut runtime) =
+            session_and_runtime(&state, cozy_chess::Color::Black, true).await;
         runtime.turn_started_server_unix_ms -= 75;
         runtime.white_time_left_ms = 25;
 
@@ -2023,6 +2112,9 @@ mod tests {
             runtime.termination,
             Some(arena_core::GameTermination::Timeout)
         );
+        finalize_human_game(state.clone(), session.clone(), runtime)
+            .await
+            .unwrap();
         let snapshot = state
             .live_matches
             .get_snapshot(session.match_series.id)
@@ -2035,7 +2127,8 @@ mod tests {
     #[tokio::test]
     async fn engine_turn_times_out_when_adapter_responds_too_late() {
         let state = test_state().await;
-        let (session, mut runtime) = session_and_runtime(cozy_chess::Color::White, false);
+        let (session, mut runtime) =
+            session_and_runtime(&state, cozy_chess::Color::White, false).await;
         runtime.white_time_left_ms = 20;
         runtime.engine = Box::new(SleepyAdapter {
             delay_ms: 40,
@@ -2051,6 +2144,9 @@ mod tests {
             runtime.termination,
             Some(arena_core::GameTermination::Timeout)
         );
+        finalize_human_game(state.clone(), session.clone(), runtime)
+            .await
+            .unwrap();
         let snapshot = state
             .live_matches
             .get_snapshot(session.match_series.id)
@@ -2063,7 +2159,8 @@ mod tests {
     #[tokio::test]
     async fn human_owner_times_out_without_submitted_move() {
         let state = test_state().await;
-        let (session, mut runtime) = session_and_runtime(cozy_chess::Color::Black, true);
+        let (session, mut runtime) =
+            session_and_runtime(&state, cozy_chess::Color::Black, true).await;
         runtime.white_time_left_ms = 10;
         runtime.turn_started_server_unix_ms -= 20;
         state.human_games.insert(session.clone()).await;
@@ -2077,13 +2174,19 @@ mod tests {
             true,
         ));
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        let snapshot = state
-            .live_matches
-            .get_snapshot(session.match_series.id)
-            .await
-            .unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let snapshot = loop {
+            if let Some(snapshot) = state
+                .live_matches
+                .get_snapshot(session.match_series.id)
+                .await
+                && snapshot.status == arena_core::LiveStatus::Finished
+            {
+                break snapshot;
+            }
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
         assert_eq!(snapshot.status, arena_core::LiveStatus::Finished);
         assert_eq!(snapshot.termination, arena_core::LiveTermination::Timeout);
         assert_eq!(snapshot.white_remaining_ms, 0);

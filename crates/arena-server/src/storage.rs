@@ -7,7 +7,7 @@ use arena_core::{
     OpeningSuite, RatingSnapshot, TimeControl, Tournament, TournamentStatus,
 };
 use chrono::Utc;
-use sqlx::{Row, SqlitePool};
+use sqlx::{Executor, Row, Sqlite, SqlitePool, Transaction};
 use uuid::Uuid;
 
 use crate::{
@@ -463,18 +463,25 @@ pub(crate) async fn update_tournament_status(
     started_at: Option<chrono::DateTime<chrono::Utc>>,
     completed_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<()> {
-    let mut tournament = get_tournament(db, tournament_id).await?;
-    tournament.status = status;
-    tournament.started_at = started_at.or(tournament.started_at);
-    tournament.completed_at = completed_at;
-    sqlx::query("UPDATE tournaments SET status = ?, started_at = ?, completed_at = ? WHERE id = ?")
-        .bind(encode_json(&tournament.status)?)
-        .bind(tournament.started_at.map(ts))
-        .bind(tournament.completed_at.map(ts))
-        .bind(tournament.id.to_string())
-        .execute(db)
-        .await?;
-    Ok(())
+    update_tournament_status_with_executor(db, tournament_id, status, started_at, completed_at)
+        .await
+}
+
+pub(crate) async fn update_tournament_status_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    tournament_id: Uuid,
+    status: TournamentStatus,
+    started_at: Option<chrono::DateTime<chrono::Utc>>,
+    completed_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<()> {
+    update_tournament_status_with_executor(
+        &mut **tx,
+        tournament_id,
+        status,
+        started_at,
+        completed_at,
+    )
+    .await
 }
 
 fn tournament_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Tournament> {
@@ -552,12 +559,15 @@ pub(crate) async fn update_match_series_status(
     id: Uuid,
     status: MatchStatus,
 ) -> Result<()> {
-    sqlx::query("UPDATE match_series SET status = ? WHERE id = ?")
-        .bind(encode_json(&status)?)
-        .bind(id.to_string())
-        .execute(db)
-        .await?;
-    Ok(())
+    update_match_series_status_with_executor(db, id, status).await
+}
+
+pub(crate) async fn update_match_series_status_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    id: Uuid,
+    status: MatchStatus,
+) -> Result<()> {
+    update_match_series_status_with_executor(&mut **tx, id, status).await
 }
 
 fn match_series_from_row(row: sqlx::sqlite::SqliteRow) -> Result<MatchSeries> {
@@ -578,40 +588,40 @@ fn match_series_from_row(row: sqlx::sqlite::SqliteRow) -> Result<MatchSeries> {
     })
 }
 
+#[allow(dead_code)]
 pub(crate) async fn insert_game(db: &SqlitePool, game: &GameRecord) -> Result<()> {
-    sqlx::query(
-        "INSERT INTO games (
-            id, tournament_id, match_id, pool_id, variant, opening_id, white_version_id, black_version_id, result, termination, start_fen, pgn, moves_uci, white_time_left_ms, black_time_left_ms, logs, started_at, completed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    )
-    .bind(game.id.to_string())
-    .bind(game.tournament_id.to_string())
-    .bind(game.match_id.to_string())
-    .bind(game.pool_id.to_string())
-    .bind(encode_json(&game.variant)?)
-    .bind(game.opening_id.map(|id| id.to_string()))
-    .bind(game.white_version_id.to_string())
-    .bind(game.black_version_id.to_string())
-    .bind(encode_json(&game.result)?)
-    .bind(encode_json(&game.termination)?)
-    .bind(&game.start_fen)
-    .bind(&game.pgn)
-    .bind(encode_json(&game.moves_uci)?)
-    .bind(game.white_time_left_ms as i64)
-    .bind(game.black_time_left_ms as i64)
-    .bind(encode_json(&game.logs)?)
-    .bind(ts(game.started_at))
-    .bind(ts(game.completed_at))
-    .execute(db)
-    .await?;
-    Ok(())
+    insert_game_with_executor(db, "games", game).await
 }
 
+pub(crate) async fn insert_game_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    game: &GameRecord,
+) -> Result<()> {
+    insert_game_with_executor(&mut **tx, "games", game).await
+}
+
+#[allow(dead_code)]
 pub(crate) async fn insert_human_game(db: &SqlitePool, game: &GameRecord) -> Result<()> {
+    insert_game_with_executor(db, "human_games", game).await
+}
+
+pub(crate) async fn insert_human_game_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    game: &GameRecord,
+) -> Result<()> {
+    insert_game_with_executor(&mut **tx, "human_games", game).await
+}
+
+async fn insert_game_with_executor<'e, E>(executor: E, table: &str, game: &GameRecord) -> Result<()>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
     sqlx::query(
-        "INSERT INTO human_games (
+        &format!(
+            "INSERT INTO {table} (
             id, tournament_id, match_id, pool_id, variant, opening_id, white_version_id, black_version_id, result, termination, start_fen, pgn, moves_uci, white_time_left_ms, black_time_left_ms, logs, started_at, completed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        ),
     )
     .bind(game.id.to_string())
     .bind(game.tournament_id.to_string())
@@ -631,7 +641,7 @@ pub(crate) async fn insert_human_game(db: &SqlitePool, game: &GameRecord) -> Res
     .bind(encode_json(&game.logs)?)
     .bind(ts(game.started_at))
     .bind(ts(game.completed_at))
-    .execute(db)
+    .execute(executor)
     .await?;
     Ok(())
 }
@@ -988,6 +998,23 @@ pub(crate) async fn upsert_live_runtime_checkpoint(
     db: &SqlitePool,
     checkpoint: &LiveRuntimeCheckpoint,
 ) -> Result<()> {
+    upsert_live_runtime_checkpoint_with_executor(db, checkpoint).await
+}
+
+pub(crate) async fn upsert_live_runtime_checkpoint_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    checkpoint: &LiveRuntimeCheckpoint,
+) -> Result<()> {
+    upsert_live_runtime_checkpoint_with_executor(&mut **tx, checkpoint).await
+}
+
+async fn upsert_live_runtime_checkpoint_with_executor<'e, E>(
+    executor: E,
+    checkpoint: &LiveRuntimeCheckpoint,
+) -> Result<()>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
     sqlx::query(
         "INSERT INTO live_runtime_checkpoints (
             match_id, seq, status, result, termination, fen, moves, white_remaining_ms, black_remaining_ms, side_to_move, turn_started_server_unix_ms, updated_at
@@ -1017,7 +1044,7 @@ pub(crate) async fn upsert_live_runtime_checkpoint(
     .bind(encode_json(&checkpoint.side_to_move)?)
     .bind(checkpoint.turn_started_server_unix_ms)
     .bind(ts(checkpoint.updated_at))
-    .execute(db)
+    .execute(executor)
     .await?;
     Ok(())
 }
@@ -1026,6 +1053,23 @@ pub(crate) async fn insert_live_runtime_event(
     db: &SqlitePool,
     event: &LiveEventEnvelope,
 ) -> Result<()> {
+    insert_live_runtime_event_with_executor(db, event).await
+}
+
+pub(crate) async fn insert_live_runtime_event_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    event: &LiveEventEnvelope,
+) -> Result<()> {
+    insert_live_runtime_event_with_executor(&mut **tx, event).await
+}
+
+async fn insert_live_runtime_event_with_executor<'e, E>(
+    executor: E,
+    event: &LiveEventEnvelope,
+) -> Result<()>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
     let (match_id, seq, event_type) = match event {
         LiveEventEnvelope::Snapshot(value) => (value.match_id, value.seq, LiveEventType::Snapshot),
         LiveEventEnvelope::MoveCommitted(value) => {
@@ -1047,8 +1091,48 @@ pub(crate) async fn insert_live_runtime_event(
     .bind(encode_json(&event_type)?)
     .bind(encode_json(event)?)
     .bind(ts(Utc::now()))
-    .execute(db)
+    .execute(executor)
     .await?;
+    Ok(())
+}
+
+async fn update_tournament_status_with_executor<'e, E>(
+    executor: E,
+    tournament_id: Uuid,
+    status: TournamentStatus,
+    started_at: Option<chrono::DateTime<chrono::Utc>>,
+    completed_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<()>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
+    sqlx::query(
+        "UPDATE tournaments
+         SET status = ?, started_at = COALESCE(?, started_at), completed_at = ?
+         WHERE id = ?",
+    )
+    .bind(encode_json(&status)?)
+    .bind(started_at.map(ts))
+    .bind(completed_at.map(ts))
+    .bind(tournament_id.to_string())
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
+async fn update_match_series_status_with_executor<'e, E>(
+    executor: E,
+    id: Uuid,
+    status: MatchStatus,
+) -> Result<()>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
+    sqlx::query("UPDATE match_series SET status = ? WHERE id = ?")
+        .bind(encode_json(&status)?)
+        .bind(id.to_string())
+        .execute(executor)
+        .await?;
     Ok(())
 }
 

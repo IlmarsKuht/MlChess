@@ -291,7 +291,7 @@ export function TournamentMapCard({
                       {winnerText(game?.result)}
                       {game ? ` • ${formatLabel(game.termination)}` : ""}
                     </p>
-                    {match.status === "running" ? (
+                    {match.watch_state === "live" ? (
                       <button type="button" className="button-ghost compact-button" onClick={() => onWatch(match.id)}>
                         Watch
                       </button>

@@ -22,7 +22,7 @@ use crate::{
     presentation::{
         ApiGameRecord, ApiLeaderboardEntry, ApiMatchSeries, HumanPlayerProfile, ReplayPayload,
         api_game_record, api_leaderboard_entry, api_match_series, participant_for_id,
-        version_name_by_id,
+        resolve_match_lifecycle, version_name_by_id,
     },
     registry::sync_setup_registry_if_changed,
     state::AppState,
@@ -31,10 +31,11 @@ use crate::{
         ensure_agent_version_exists, ensure_human_player, ensure_pool_exists, get_agent,
         get_agent_version, get_event_preset, get_game, get_match_series, get_opening_suite,
         get_pool, get_request_journal_entry, get_tournament, list_agent_versions, list_agents,
-        list_event_presets, list_games, list_match_series, list_opening_suites, list_pools,
-        list_recent_request_errors, list_request_journal_for_entities, list_tournaments,
-        load_aggregate_leaderboard, load_live_runtime_checkpoint, load_live_runtime_events_since,
-        load_pool_leaderboard, load_rating_history, update_tournament_status,
+        list_event_presets, list_games, list_live_runtime_checkpoints, list_match_series,
+        list_opening_suites, list_pools, list_recent_request_errors,
+        list_request_journal_for_entities, list_tournaments, load_aggregate_leaderboard,
+        load_live_runtime_checkpoint, load_live_runtime_events_since, load_pool_leaderboard,
+        load_rating_history, update_tournament_status,
     },
 };
 use arena_core::{LiveEventEnvelope, LiveMatchSnapshot};
@@ -428,13 +429,36 @@ async fn list_matches_handler(
     let versions = list_agent_versions(&state.db, None).await?;
     let version_name_by_id = version_name_by_id(&versions);
     let human_player = ensure_human_player(&state.db).await?;
+    let games = list_games(&state.db, query.tournament_id, None).await?;
+    let checkpoints = list_live_runtime_checkpoints(&state.db, None).await?;
+    let game_id_by_match_id = games
+        .into_iter()
+        .map(|game| (game.match_id, game.id))
+        .collect::<std::collections::HashMap<_, _>>();
+    let checkpoint_by_match_id = checkpoints
+        .into_iter()
+        .map(|checkpoint| (checkpoint.match_id, checkpoint))
+        .collect::<std::collections::HashMap<_, _>>();
     let mut matches: Vec<_> = list_match_series(&state.db, query.tournament_id)
         .await?
         .into_iter()
         .map(|series| {
             let interactive = series.white_version_id == human_player.id
                 || series.black_version_id == human_player.id;
-            api_match_series(&series, &version_name_by_id, &human_player, interactive)
+            let (status, watch_state, game_id) = resolve_match_lifecycle(
+                &series,
+                game_id_by_match_id.get(&series.id).copied(),
+                checkpoint_by_match_id.get(&series.id),
+            );
+            api_match_series(
+                &series,
+                status,
+                watch_state,
+                game_id,
+                &version_name_by_id,
+                &human_player,
+                interactive,
+            )
         })
         .collect();
     matches.sort_by(|left, right| right.created_at.cmp(&left.created_at));
@@ -1521,6 +1545,170 @@ mod tests {
             Some("2026-04-12T17:44:23.450Z")
         );
         assert!(leaderboards_request.duration_ms >= 0);
+    }
+
+    #[tokio::test]
+    async fn list_matches_resolves_finished_game_to_replay() {
+        let state = setup_state().await;
+        let app = crate::build_app(state.clone());
+        let pool = crate::storage::list_pools(&state.db)
+            .await
+            .unwrap()
+            .remove(0);
+        let mut versions = crate::storage::list_agent_versions(&state.db, None)
+            .await
+            .unwrap();
+        let white = versions.remove(0);
+        let black = versions.remove(0);
+        let tournament = arena_core::Tournament {
+            id: Uuid::new_v4(),
+            name: "resolved".to_string(),
+            kind: arena_core::TournamentKind::RoundRobin,
+            pool_id: pool.id,
+            participant_version_ids: vec![white.id, black.id],
+            worker_count: 1,
+            games_per_pairing: 1,
+            status: arena_core::TournamentStatus::Completed,
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            completed_at: Some(Utc::now()),
+        };
+        crate::storage::insert_tournament(&state.db, &tournament)
+            .await
+            .unwrap();
+        let series = arena_core::MatchSeries {
+            id: Uuid::new_v4(),
+            tournament_id: tournament.id,
+            pool_id: pool.id,
+            round_index: 0,
+            white_version_id: white.id,
+            black_version_id: black.id,
+            opening_id: None,
+            game_index: 0,
+            status: arena_core::MatchStatus::Running,
+            created_at: Utc::now(),
+        };
+        crate::storage::insert_match_series(&state.db, &series)
+            .await
+            .unwrap();
+        let game = arena_core::GameRecord {
+            id: Uuid::new_v4(),
+            tournament_id: tournament.id,
+            match_id: series.id,
+            pool_id: pool.id,
+            variant: pool.variant,
+            opening_id: None,
+            white_version_id: white.id,
+            black_version_id: black.id,
+            result: arena_core::GameResult::WhiteWin,
+            termination: arena_core::GameTermination::EngineFailure,
+            start_fen: "startpos".to_string(),
+            pgn: String::new(),
+            moves_uci: vec!["e2e4".to_string()],
+            white_time_left_ms: pool.time_control.initial_ms,
+            black_time_left_ms: pool.time_control.initial_ms,
+            logs: Vec::new(),
+            started_at: Utc::now(),
+            completed_at: Utc::now(),
+        };
+        crate::storage::insert_game(&state.db, &game).await.unwrap();
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/matches")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let first = payload.as_array().and_then(|items| items.first()).unwrap();
+        assert_eq!(
+            first.get("status").and_then(Value::as_str),
+            Some("completed")
+        );
+        assert_eq!(
+            first.get("watch_state").and_then(Value::as_str),
+            Some("replay")
+        );
+        assert_eq!(
+            first.get("game_id").and_then(Value::as_str),
+            Some(game.id.to_string().as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn list_matches_reports_unavailable_when_running_row_has_no_live_state() {
+        let state = setup_state().await;
+        let app = crate::build_app(state.clone());
+        let pool = crate::storage::list_pools(&state.db)
+            .await
+            .unwrap()
+            .remove(0);
+        let mut versions = crate::storage::list_agent_versions(&state.db, None)
+            .await
+            .unwrap();
+        let white = versions.remove(0);
+        let black = versions.remove(0);
+        let tournament = arena_core::Tournament {
+            id: Uuid::new_v4(),
+            name: "unavailable".to_string(),
+            kind: arena_core::TournamentKind::RoundRobin,
+            pool_id: pool.id,
+            participant_version_ids: vec![white.id, black.id],
+            worker_count: 1,
+            games_per_pairing: 1,
+            status: arena_core::TournamentStatus::Running,
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            completed_at: None,
+        };
+        crate::storage::insert_tournament(&state.db, &tournament)
+            .await
+            .unwrap();
+        crate::storage::insert_match_series(
+            &state.db,
+            &arena_core::MatchSeries {
+                id: Uuid::new_v4(),
+                tournament_id: tournament.id,
+                pool_id: pool.id,
+                round_index: 0,
+                white_version_id: white.id,
+                black_version_id: black.id,
+                opening_id: None,
+                game_index: 0,
+                status: arena_core::MatchStatus::Running,
+                created_at: Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/matches")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let first = payload.as_array().and_then(|items| items.first()).unwrap();
+        assert_eq!(first.get("status").and_then(Value::as_str), Some("running"));
+        assert_eq!(
+            first.get("watch_state").and_then(Value::as_str),
+            Some("unavailable")
+        );
     }
 
     #[tokio::test]

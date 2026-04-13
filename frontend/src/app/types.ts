@@ -12,6 +12,7 @@ export type GameResult = "white_win" | "black_win" | "draw";
 export type LiveSide = "white" | "black";
 export type ProtocolLiveSide = "white" | "black" | "none";
 export type LiveStatus = "running" | "finished" | "aborted";
+export type MatchWatchState = "live" | "replay" | "unavailable";
 export type LiveResult = "white_win" | "black_win" | "draw" | "none";
 export type GameTermination =
   | "checkmate"
@@ -119,6 +120,8 @@ export interface MatchSeries {
   opening_id?: string | null;
   game_index: number;
   status: string;
+  watch_state: MatchWatchState;
+  game_id?: string | null;
   created_at: string;
   white_participant: Participant;
   black_participant: Participant;

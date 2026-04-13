@@ -16,6 +16,7 @@ import {
   toggleDebugEnabled
 } from "./app/debug";
 import { useConfirmedLiveMatch } from "./app/live";
+import { useLivePlayback } from "./app/livePlayback";
 import {
   BoardView,
   EmptyState,
@@ -54,10 +55,10 @@ import {
   formatTimeControl,
   formatTournamentKind,
   formatVariant,
+  isPendingLiveWatchMatch,
   isTerminalLiveStatus,
   lastWatchedKey,
   legalMovesByOrigin,
-  liveRevealDelayMs,
   loadErrorMessage,
   maybePromotion,
   engineHash,
@@ -105,9 +106,6 @@ export default function App() {
   const [isSubmittingHumanMove, setIsSubmittingHumanMove] = useState(false);
   const [selectedLiveMatchId, setSelectedLiveMatchId] = useState("");
   const [liveNowMs, setLiveNowMs] = useState(() => Date.now());
-  const [displayedLiveFrameCount, setDisplayedLiveFrameCount] = useState(0);
-  const [selectedLivePly, setSelectedLivePly] = useState(0);
-  const [isLiveFollowing, setIsLiveFollowing] = useState(true);
   const [locationHash, setLocationHash] = useState(() => window.location.hash);
   const [lastWatchedMatchId, setLastWatchedMatchId] = useState(() => {
     try {
@@ -135,15 +133,34 @@ export default function App() {
   const documentedVersions = versions.filter((version) => Boolean(version.documentation?.trim()));
   const recentGames = games.slice(0, 6);
   const runningTournaments = tournaments.filter((tournament) => tournament.status === "running");
-  const runningMatches = matches.filter((match) => match.status === "running");
+  const runningMatches = matches.filter((match) => match.status === "running" && match.watch_state === "live");
   const completedTournaments = tournaments.filter((tournament) => tournament.status === "completed");
   const activePool = pools.find((pool) => pool.id === selectedPoolId) ?? pools[0];
+  const selectedLiveMatch = matches.find((match) => match.id === selectedLiveMatchId) ?? null;
+  const selectedWatchGame =
+    selectedLiveMatch?.watch_state === "replay"
+      ? games.find((game) => game.id === selectedLiveMatch.game_id) ??
+        games.find((game) => game.match_id === selectedLiveMatch.id) ??
+        null
+      : null;
+  const selectedWatchReplay = selectedWatchGame
+    ? {
+        id: selectedWatchGame.id,
+        variant: selectedWatchGame.variant,
+        start_fen: selectedWatchGame.start_fen,
+        pgn: selectedWatchGame.pgn,
+        moves_uci: selectedWatchGame.moves_uci,
+        result: selectedWatchGame.result,
+        termination: selectedWatchGame.termination
+      }
+    : null;
   const replayFrames = buildReplayFrames(replay);
   const currentFen = replayFrames[Math.min(selectedPly, Math.max(replayFrames.length - 1, 0))];
   const boardSquares = currentFen ? fenToBoard(currentFen) : [];
-  const confirmedLiveMatch = useConfirmedLiveMatch(selectedLiveMatchId);
+  const confirmedLiveMatch = useConfirmedLiveMatch(
+    selectedLiveMatch?.watch_state === "live" ? selectedLiveMatchId : ""
+  );
   const confirmedLiveSnapshot = confirmedLiveMatch.snapshot;
-  const selectedLiveMatch = matches.find((match) => match.id === selectedLiveMatchId) ?? null;
   const liveVariant = selectedLiveMatch ? poolById[selectedLiveMatch.pool_id]?.variant ?? "standard" : "standard";
   const rawLiveGame =
     confirmedLiveSnapshot && selectedLiveMatch
@@ -183,8 +200,17 @@ export default function App() {
               (selectedLiveMatch.black_participant.kind === "human_player" && confirmedLiveSnapshot.side_to_move === "black"))
         }
       : null;
+  const livePlayback = useLivePlayback({
+    matchId: rawLiveGame?.match_id ?? "",
+    liveFrameCount: rawLiveGame?.live_frames.length ?? 0,
+    interactive: rawLiveGame?.interactive ?? false,
+    activelyWatching: route.page === "watch"
+  });
 
   const allLiveFrames = rawLiveGame?.live_frames ?? [];
+  const displayedLiveFrameCount = livePlayback.displayedLiveFrameCount;
+  const selectedLivePly = livePlayback.selectedLivePly;
+  const isLiveFollowing = livePlayback.isLiveFollowing;
   const revealedLiveFrames = allLiveFrames.slice(0, displayedLiveFrameCount);
   const maxDisplayedLiveFrameIndex = Math.max(revealedLiveFrames.length - 1, 0);
   const visibleLiveFrameIndex = isLiveFollowing
@@ -234,9 +260,15 @@ export default function App() {
     : rawLiveGame
       ? tournamentById[rawLiveGame.tournament_id]
       : undefined;
+  const watchReplayFrames = buildReplayFrames(selectedWatchReplay);
+  const watchReplayFen =
+    watchReplayFrames[Math.min(selectedPly, Math.max(watchReplayFrames.length - 1, 0))] ?? "";
+  const watchReplaySquares = watchReplayFen ? fenToBoard(watchReplayFen) : [];
+  const pendingSelectedLiveMatch =
+    selectedLiveMatch !== null && isPendingLiveWatchMatch(selectedLiveMatch);
   const pendingLiveMatch =
     route.page === "watch" &&
-    ((selectedLiveMatch?.status === "running" && !rawLiveGame) ||
+    (((selectedLiveMatch?.watch_state === "live" || pendingSelectedLiveMatch) && !rawLiveGame) ||
       (!selectedLiveMatch && !rawLiveGame && !!route.matchId));
   const resumableMatch = runningMatches.find((match) => match.id === lastWatchedMatchId) ?? null;
   const sortedTournaments = [...tournaments].sort((left, right) => {
@@ -447,16 +479,11 @@ export default function App() {
 
     if (runningMatches.length === 0) {
       setSelectedLiveMatchId("");
-      setDisplayedLiveFrameCount(0);
-      setSelectedLivePly(0);
-      setIsLiveFollowing(true);
       return;
     }
 
     if (!selectedLiveMatchId || !runningMatches.some((match) => match.id === selectedLiveMatchId)) {
       setSelectedLiveMatchId(runningMatches[0].id);
-      setSelectedLivePly(0);
-      setIsLiveFollowing(true);
     }
   }, [route.page, runningMatches, selectedLiveMatchId]);
 
@@ -474,6 +501,12 @@ export default function App() {
   }, [selectedLiveMatchId]);
 
   useEffect(() => {
+    if (route.page === "watch" && selectedWatchReplay) {
+      setSelectedPly(Math.max(watchReplayFrames.length - 1, 0));
+    }
+  }, [route.page, selectedWatchReplay?.id, watchReplayFrames.length]);
+
+  useEffect(() => {
     if (!rawLiveGame || rawLiveGame.status !== "running") {
       return;
     }
@@ -487,30 +520,13 @@ export default function App() {
 
   useEffect(() => {
     if (!rawLiveGame) {
-      setDisplayedLiveFrameCount(0);
-      setSelectedLivePly(0);
-      setIsLiveFollowing(true);
       setSelectedBoardSquare("");
       setInvalidBoardSquare("");
       return;
     }
-
-    const initialVisibleFrames = rawLiveGame.interactive ? rawLiveGame.live_frames.length : Math.min(rawLiveGame.live_frames.length, 1);
-    setDisplayedLiveFrameCount(initialVisibleFrames);
-    setSelectedLivePly(Math.max(initialVisibleFrames - 1, 0));
-    setIsLiveFollowing(true);
     setSelectedBoardSquare("");
     setInvalidBoardSquare("");
   }, [rawLiveGame?.match_id]);
-
-  useEffect(() => {
-    if (rawLiveGame?.interactive) {
-      setDisplayedLiveFrameCount(rawLiveGame.live_frames.length);
-      if (isLiveFollowing) {
-        setSelectedLivePly(Math.max(rawLiveGame.live_frames.length - 1, 0));
-      }
-    }
-  }, [rawLiveGame?.interactive, rawLiveGame?.live_frames.length, isLiveFollowing]);
 
   useEffect(() => {
     if (!invalidBoardSquare) {
@@ -523,48 +539,6 @@ export default function App() {
 
     return () => window.clearTimeout(timer);
   }, [invalidBoardSquare]);
-
-  const liveFrameCount = rawLiveGame?.live_frames.length ?? 0;
-  const interactiveLiveGame = rawLiveGame?.interactive ?? false;
-
-  useEffect(() => {
-    if (!rawLiveGame && displayedLiveFrameCount !== 0) {
-      setDisplayedLiveFrameCount(0);
-      return;
-    }
-
-    if (rawLiveGame && displayedLiveFrameCount > liveFrameCount) {
-      setDisplayedLiveFrameCount(liveFrameCount);
-    }
-  }, [rawLiveGame?.match_id, liveFrameCount, displayedLiveFrameCount]);
-
-  useEffect(() => {
-    if (!rawLiveGame || interactiveLiveGame) {
-      return;
-    }
-
-    if (displayedLiveFrameCount >= liveFrameCount) {
-      return;
-    }
-
-    const timer = window.setTimeout(() => {
-      setDisplayedLiveFrameCount((current) => Math.min(current + 1, liveFrameCount));
-    }, liveRevealDelayMs);
-
-    return () => window.clearTimeout(timer);
-  }, [rawLiveGame?.match_id, interactiveLiveGame, liveFrameCount, displayedLiveFrameCount]);
-
-  useEffect(() => {
-    if (isLiveFollowing) {
-      setSelectedLivePly(maxDisplayedLiveFrameIndex);
-    }
-  }, [isLiveFollowing, maxDisplayedLiveFrameIndex]);
-
-  useEffect(() => {
-    if (!isLiveFollowing && selectedLivePly > maxDisplayedLiveFrameIndex) {
-      setSelectedLivePly(maxDisplayedLiveFrameIndex);
-    }
-  }, [isLiveFollowing, selectedLivePly, maxDisplayedLiveFrameIndex]);
 
   async function withRefresh(action: () => Promise<void>, success: string) {
     try {
@@ -610,7 +584,9 @@ export default function App() {
       const tournamentMatches = await fetchJson<MatchSeries[]>(
         `/matches?tournament_id=${encodeURIComponent(tournamentId)}`
       );
-      const liveMatch = tournamentMatches.find((match) => match.status === "running") ?? tournamentMatches[0];
+      const liveMatch = tournamentMatches.find(
+        (match) => match.status === "running" && match.watch_state === "live"
+      );
       if (liveMatch) {
         return liveMatch.id;
       }
@@ -891,28 +867,34 @@ export default function App() {
   ) : null;
 
   if (route.page === "watch") {
+    const watchTitle = selectedLiveMatch?.interactive
+      ? "Fullscreen human match"
+      : selectedLiveMatch?.watch_state === "replay"
+        ? "Fullscreen match replay"
+        : "Fullscreen engine viewer";
+    const watchCopy = selectedLiveMatch?.interactive
+      ? "Play directly on the board, watch the engine answer, and keep the clocks and move list in view."
+      : selectedLiveMatch?.watch_state === "replay"
+        ? "Review a finished match with the same spacious board and side panels used for live viewing."
+        : "Follow one match at a readable pace with clear White and Black panels and a slightly delayed move feed.";
     return (
       <div className="watch-shell">
         <header className="watch-header">
           <div className="watch-header-copy">
-            <p className="eyebrow">{interactiveLive ? "Play vs Engine" : "Live Watch"}</p>
-            <h1>{interactiveLive ? "Fullscreen human match" : "Fullscreen engine viewer"}</h1>
-            <p className="lede">
-              {interactiveLive
-                ? "Play directly on the board, watch the engine answer, and keep the clocks and move list in view."
-                : "Follow one match at a readable pace with clear White and Black panels and a slightly delayed move feed."}
-            </p>
+            <p className="eyebrow">{selectedLiveMatch?.interactive ? "Play vs Engine" : "Live Watch"}</p>
+            <h1>{watchTitle}</h1>
+            <p className="lede">{watchCopy}</p>
           </div>
           <div className="watch-header-actions">
             <button
               type="button"
               className="button-ghost"
-              onClick={() => navigateToView(interactiveLive ? "play_engine" : "live_duel")}
+              onClick={() => navigateToView(selectedLiveMatch?.interactive ? "play_engine" : "live_duel")}
             >
               Back to arena
             </button>
             {selectedLiveMatch ? (
-              <StatusBadge tone={statusTone(visibleLiveStatus)}>
+              <StatusBadge tone={statusTone(selectedLiveMatch.status)}>
                 {selectedLiveMatch.interactive
                   ? "Human game"
                   : roundLabel(selectedLiveTournament?.kind ?? "round_robin", selectedLiveMatch.round_index)}
@@ -931,6 +913,105 @@ export default function App() {
               Preparing the live board. The match exists, and the viewer is waiting for the first live state to arrive.
             </EmptyState>
           </section>
+        ) : selectedLiveMatch?.watch_state === "replay" && selectedWatchReplay ? (
+          <section className="panel watch-panel">
+            <div className="watch-stage">
+              <div className="watch-board-column">
+                <div className="watch-meta-bar">
+                  <div>
+                    <strong>
+                      {participantName(selectedLiveMatch.white_participant, "White")} vs{" "}
+                      {participantName(selectedLiveMatch.black_participant, "Black")}
+                    </strong>
+                    <p>
+                      {poolNameById[selectedLiveMatch.pool_id] ?? "Unknown format"} •{" "}
+                      {selectedLiveMatch.interactive
+                        ? "Human game"
+                        : roundLabel(selectedLiveTournament?.kind ?? "round_robin", selectedLiveMatch.round_index)}
+                    </p>
+                  </div>
+                  <StatusBadge tone={statusTone(selectedLiveMatch.status)}>
+                    {formatLabel(selectedLiveMatch.status)}
+                  </StatusBadge>
+                </div>
+
+                {selectedWatchReplay.variant === "standard" && watchReplaySquares.length > 0 ? (
+                  <div className="watch-board-wrap">
+                    <BoardView squares={watchReplaySquares} />
+                  </div>
+                ) : (
+                  <EmptyState>
+                    Board replay is available for standard games. Chess960 replays still include the move list and
+                    result details.
+                  </EmptyState>
+                )}
+
+                <div className="watch-controls">
+                  <div className="scrubber-row">
+                    <span>
+                      Ply {selectedPly} / {Math.max(watchReplayFrames.length - 1, 0)}
+                    </span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={Math.max(watchReplayFrames.length - 1, 0)}
+                      value={Math.min(selectedPly, Math.max(watchReplayFrames.length - 1, 0))}
+                      onChange={(event) => setSelectedPly(Number(event.target.value))}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="watch-info-column">
+                <div className="watch-side-grid">
+                  <EngineSideCard
+                    side="white"
+                    title={selectedLiveMatch.white_participant.kind === "human_player" ? "You" : "White engine"}
+                    name={participantName(selectedLiveMatch.white_participant, "White")}
+                    clock={formatClock(selectedWatchGame?.white_time_left_ms ?? 0)}
+                  />
+                  <EngineSideCard
+                    side="black"
+                    title={selectedLiveMatch.black_participant.kind === "human_player" ? "You" : "Black engine"}
+                    name={participantName(selectedLiveMatch.black_participant, "Black")}
+                    clock={formatClock(selectedWatchGame?.black_time_left_ms ?? 0)}
+                  />
+                </div>
+
+                <div className="watch-stats-grid">
+                  <StatCard label="Visible plies" value={String(selectedWatchReplay.moves_uci.length)} />
+                  <StatCard
+                    label="Updated"
+                    value={selectedWatchGame ? formatRelativeTime(new Date(selectedWatchGame.completed_at).getTime()) : "--"}
+                  />
+                  <StatCard label="Result" value={matchResultText(selectedWatchReplay.result)} />
+                </div>
+
+                <div className="result-strip">
+                  <strong>Replay summary</strong>
+                  <span>
+                    {winnerText(selectedWatchReplay.result)}
+                    {selectedWatchReplay.termination ? ` via ${formatLabel(selectedWatchReplay.termination)}` : ""}
+                  </span>
+                </div>
+
+                <div className="move-panel">
+                  <div className="panel-header move-panel-header">
+                    <h2>Moves</h2>
+                    <span>{selectedWatchReplay.moves_uci.length} total</span>
+                  </div>
+                  <MoveList moves={selectedWatchReplay.moves_uci} activePly={selectedPly} />
+                </div>
+              </div>
+            </div>
+          </section>
+        ) : selectedLiveMatch?.watch_state === "unavailable" ? (
+          <section className="panel watch-panel">
+            <EmptyState>
+              This match is not live-watchable right now. Its live state is unavailable, and no finished replay was
+              found.
+            </EmptyState>
+          </section>
         ) : !selectedLiveMatch && !rawLiveGame ? (
           <section className="panel watch-panel">
             <EmptyState>
@@ -938,7 +1019,7 @@ export default function App() {
               has not started yet.
             </EmptyState>
           </section>
-        ) : (
+        ) : rawLiveGame ? (
           <section className="panel watch-panel">
             <div className="watch-stage">
               <div className="watch-board-column">
@@ -992,9 +1073,7 @@ export default function App() {
                       max={maxDisplayedLiveFrameIndex}
                       value={Math.min(visibleLiveFrameIndex, maxDisplayedLiveFrameIndex)}
                       onChange={(event) => {
-                        const next = Number(event.target.value);
-                        setSelectedLivePly(next);
-                        setIsLiveFollowing(next >= maxDisplayedLiveFrameIndex);
+                        livePlayback.setSelectedLivePly(Number(event.target.value));
                       }}
                     />
                   </div>
@@ -1014,7 +1093,7 @@ export default function App() {
                           : "Reconnecting live feed..."}
                     </span>
                     {!isLiveFollowing ? (
-                      <button type="button" className="button-ghost" onClick={() => setIsLiveFollowing(true)}>
+                      <button type="button" className="button-ghost" onClick={livePlayback.returnToLive}>
                         Return to live
                       </button>
                     ) : null}
@@ -1066,6 +1145,10 @@ export default function App() {
                 </div>
               </div>
             </div>
+          </section>
+        ) : (
+          <section className="panel watch-panel">
+            <EmptyState>Loading match viewer.</EmptyState>
           </section>
         )}
       </div>
