@@ -225,7 +225,13 @@ pub(crate) async fn init_db(db: &SqlitePool) -> Result<()> {
     ensure_column(db, "agent_versions", "documentation", "TEXT").await?;
     ensure_column(db, "request_journal", "client_route", "TEXT").await?;
     ensure_column(db, "request_journal", "client_ts", "TEXT").await?;
-    ensure_column(db, "request_journal", "duration_ms", "INTEGER NOT NULL DEFAULT 0").await?;
+    ensure_column(
+        db,
+        "request_journal",
+        "duration_ms",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
     ensure_column(db, "benchmark_pools", "registry_key", "TEXT").await?;
     ensure_column(db, "opening_suites", "registry_key", "TEXT").await?;
     ensure_column(db, "event_presets", "registry_key", "TEXT").await?;

@@ -107,6 +107,19 @@ export function formatClock(ms: number) {
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;
 }
 
+export function liveClockElapsedMs(options: {
+  status?: string;
+  isLiveFollowing: boolean;
+  liveNowMs: number;
+  turnStartedServerUnixMs?: number;
+}) {
+  const { status, isLiveFollowing, liveNowMs, turnStartedServerUnixMs } = options;
+  if (!isLiveFollowing || status !== "running" || turnStartedServerUnixMs === undefined) {
+    return 0;
+  }
+  return Math.max(0, liveNowMs - turnStartedServerUnixMs);
+}
+
 export function formatRelativeTime(timestamp: number) {
   const elapsedMs = Math.max(0, Date.now() - timestamp);
   const elapsedSeconds = Math.floor(elapsedMs / 1000);

@@ -49,6 +49,7 @@ import {
   fenToBoard,
   formatClock,
   formatLabel,
+  liveClockElapsedMs,
   formatRelativeTime,
   formatTimeControl,
   formatTournamentKind,
@@ -196,10 +197,12 @@ export default function App() {
   const displayedLiveMoves = revealedLiveFrames.flatMap((frame) => (frame.move_uci ? [frame.move_uci] : []));
   const liveDelayActive = rawLiveGame !== null && displayedLiveFrameCount < allLiveFrames.length;
   const visibleLiveUpdatedAtMs = visibleLiveFrame ? new Date(visibleLiveFrame.updated_at).getTime() : 0;
-  const runningClockElapsedMs =
-    visibleLiveFrame && visibleLiveFrame.status === "running"
-      ? Math.max(0, liveNowMs - visibleLiveFrame.turn_started_server_unix_ms)
-      : 0;
+  const runningClockElapsedMs = liveClockElapsedMs({
+    status: visibleLiveFrame?.status,
+    isLiveFollowing,
+    liveNowMs,
+    turnStartedServerUnixMs: visibleLiveFrame?.turn_started_server_unix_ms
+  });
   const displayedWhiteClockMs =
     visibleLiveFrame && visibleLiveFrame.side_to_move === "white"
       ? Math.max(0, visibleLiveFrame.white_time_left_ms - runningClockElapsedMs)
@@ -521,36 +524,35 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [invalidBoardSquare]);
 
+  const liveFrameCount = rawLiveGame?.live_frames.length ?? 0;
+  const interactiveLiveGame = rawLiveGame?.interactive ?? false;
+
   useEffect(() => {
     if (!rawLiveGame && displayedLiveFrameCount !== 0) {
       setDisplayedLiveFrameCount(0);
       return;
     }
 
-    if (rawLiveGame && displayedLiveFrameCount > rawLiveGame.live_frames.length) {
-      setDisplayedLiveFrameCount(rawLiveGame.live_frames.length);
+    if (rawLiveGame && displayedLiveFrameCount > liveFrameCount) {
+      setDisplayedLiveFrameCount(liveFrameCount);
     }
-  }, [rawLiveGame, displayedLiveFrameCount]);
+  }, [rawLiveGame?.match_id, liveFrameCount, displayedLiveFrameCount]);
 
   useEffect(() => {
-    if (!rawLiveGame) {
+    if (!rawLiveGame || interactiveLiveGame) {
       return;
     }
 
-    if (rawLiveGame.interactive) {
-      return;
-    }
-
-    if (displayedLiveFrameCount >= rawLiveGame.live_frames.length) {
+    if (displayedLiveFrameCount >= liveFrameCount) {
       return;
     }
 
     const timer = window.setTimeout(() => {
-      setDisplayedLiveFrameCount((current) => Math.min(current + 1, rawLiveGame.live_frames.length));
+      setDisplayedLiveFrameCount((current) => Math.min(current + 1, liveFrameCount));
     }, liveRevealDelayMs);
 
     return () => window.clearTimeout(timer);
-  }, [rawLiveGame, displayedLiveFrameCount]);
+  }, [rawLiveGame?.match_id, interactiveLiveGame, liveFrameCount, displayedLiveFrameCount]);
 
   useEffect(() => {
     if (isLiveFollowing) {

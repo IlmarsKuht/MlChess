@@ -36,6 +36,8 @@ interface ConfirmedLiveState {
   timeline: ConfirmedLiveFrame[];
 }
 
+const transientMissingLiveStateRetryLimit = 5;
+
 type ReduceResult =
   | { kind: "noop"; state: ConfirmedLiveState | null }
   | { kind: "next"; state: ConfirmedLiveState }
@@ -119,6 +121,10 @@ function isErrorMessage(message: LiveWsServerMessage): message is LiveErrorMessa
   return "message_type" in message && message.message_type === "error";
 }
 
+function isMissingLiveStateError(error: string) {
+  return /^live state for match [0-9a-f-]+ not found$/i.test(error.trim());
+}
+
 function reduceEvent(current: ConfirmedLiveState | null, event: LiveProtocolEvent): ReduceResult {
   if (event.event_type === "snapshot") {
     if (current?.snapshot && event.seq <= current.snapshot.seq) {
@@ -175,6 +181,7 @@ export function useConfirmedLiveMatch(matchId: string) {
   const reconnectTimerRef = useRef<number | null>(null);
   const wsConnectionIdRef = useRef<string | null>(null);
   const connectAttemptRef = useRef(0);
+  const missingLiveStateRetryCountRef = useRef(0);
 
   useEffect(() => {
     if (!matchId) {
@@ -182,6 +189,7 @@ export function useConfirmedLiveMatch(matchId: string) {
       stateRef.current = null;
       setError("");
       setIsConnected(false);
+      missingLiveStateRetryCountRef.current = 0;
       return;
     }
 
@@ -206,6 +214,8 @@ export function useConfirmedLiveMatch(matchId: string) {
       if (cancelled) {
         return;
       }
+      missingLiveStateRetryCountRef.current = 0;
+      setError("");
       setState((current) => {
         const result = reduceEvent(current, next);
         const nextState = result.kind === "next" ? result.state : current;
@@ -231,6 +241,7 @@ export function useConfirmedLiveMatch(matchId: string) {
         return;
       }
       if (result.kind === "next") {
+        missingLiveStateRetryCountRef.current = 0;
         stateRef.current = result.state;
         setState(result.state);
         setUiDebugState({
@@ -296,6 +307,18 @@ export function useConfirmedLiveMatch(matchId: string) {
             return;
           }
           if (isErrorMessage(message)) {
+            const shouldRetryMissingState =
+              !stateRef.current?.snapshot &&
+              isMissingLiveStateError(message.error) &&
+              missingLiveStateRetryCountRef.current < transientMissingLiveStateRetryLimit;
+            if (shouldRetryMissingState) {
+              missingLiveStateRetryCountRef.current += 1;
+              void loadSnapshot().catch(() => {
+                // The match may not have published its first snapshot yet.
+              });
+              socket.close();
+              return;
+            }
             setError(message.error);
             setUiDebugState({
               last_ui_error: message.error,

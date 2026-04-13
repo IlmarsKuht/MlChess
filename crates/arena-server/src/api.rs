@@ -567,25 +567,26 @@ async fn save_debug_report_handler(
     State(state): State<AppState>,
     Json(payload): Json<SaveDebugReportRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    std::fs::create_dir_all(&state.debug_reports_dir).map_err(|err| ApiError::Internal(err.into()))?;
+    std::fs::create_dir_all(&state.debug_reports_dir)
+        .map_err(|err| ApiError::Internal(err.into()))?;
     let report = payload.report;
     let entity_hint = report
         .get("correlation")
         .and_then(|value| {
-            value.get("match_id")
+            value
+                .get("match_id")
                 .or_else(|| value.get("game_id"))
                 .or_else(|| value.get("tournament_id"))
         })
         .and_then(Value::as_str)
         .unwrap_or("general");
     let timestamp = Utc::now().format("%Y-%m-%dT%H-%M-%SZ");
-    let filename = sanitize_report_filename(
-        payload.preferred_filename.as_deref().unwrap_or(&format!(
-            "mlchess-bug-report-{timestamp}-{entity_hint}.json"
-        )),
-    );
+    let filename = sanitize_report_filename(payload.preferred_filename.as_deref().unwrap_or(
+        &format!("mlchess-bug-report-{timestamp}-{entity_hint}.json"),
+    ));
     let path = state.debug_reports_dir.join(filename);
-    let serialized = serde_json::to_string_pretty(&report).map_err(|err| ApiError::Internal(err.into()))?;
+    let serialized =
+        serde_json::to_string_pretty(&report).map_err(|err| ApiError::Internal(err.into()))?;
     std::fs::write(&path, serialized).map_err(|err| ApiError::Internal(err.into()))?;
     Ok(Json(json!({
         "saved": true,
@@ -1226,7 +1227,8 @@ mod tests {
             live_matches: crate::live::LiveMatchStore::default(),
             live_metrics: crate::state::LiveMetricsStore::default(),
             human_games: HumanGameStore::default(),
-            debug_reports_dir: std::env::temp_dir().join(format!("mlchess-debug-reports-{}", Uuid::new_v4())),
+            debug_reports_dir: std::env::temp_dir()
+                .join(format!("mlchess-debug-reports-{}", Uuid::new_v4())),
             frontend_dist: None,
             setup_registry,
         }
@@ -1551,7 +1553,10 @@ mod tests {
             .await
             .unwrap();
         let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let path = payload.get("path").and_then(serde_json::Value::as_str).unwrap();
+        let path = payload
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .unwrap();
         assert!(path.contains("custom-report.json"));
         assert!(std::path::Path::new(path).exists());
         assert!(path.starts_with(reports_dir.to_string_lossy().as_ref()));
