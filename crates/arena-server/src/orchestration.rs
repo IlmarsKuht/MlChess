@@ -2191,4 +2191,38 @@ mod tests {
         assert_eq!(snapshot.termination, arena_core::LiveTermination::Timeout);
         assert_eq!(snapshot.white_remaining_ms, 0);
     }
+
+    #[tokio::test]
+    async fn create_human_game_persists_match_series_with_human_participant() {
+        let state = test_state().await;
+        let pool = crate::storage::list_pools(&state.db)
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let engine_version = list_agent_versions(&state.db, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let human_player = ensure_human_player(&state.db).await.unwrap();
+
+        let (match_id, _tournament_id) = create_human_game(
+            &state,
+            "test human game".to_string(),
+            pool.id,
+            engine_version.id,
+            true,
+        )
+        .await
+        .unwrap();
+
+        let series = crate::storage::get_match_series(&state.db, match_id)
+            .await
+            .unwrap();
+        assert_eq!(series.white_version_id, human_player.id);
+        assert_eq!(series.black_version_id, engine_version.id);
+    }
 }

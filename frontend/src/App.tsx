@@ -76,6 +76,10 @@ import {
   winnerText
 } from "./app/utils";
 
+function sameAgentList(left: Agent[], right: Agent[]) {
+  return left.length === right.length && left.every((agent, index) => agent.id === right[index]?.id);
+}
+
 export default function App() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [versions, setVersions] = useState<AgentVersion[]>([]);
@@ -320,13 +324,16 @@ export default function App() {
         ),
         fetchJson<HumanPlayerProfile>("/human-player")
       ]);
-
-      const versionResponses = await Promise.all(
-        agentsResponse.map((agent) => fetchJson<AgentVersion[]>(`/agents/${agent.id}/versions`))
-      );
+      const shouldRefreshVersions =
+        !options.silent || versions.length === 0 || !sameAgentList(agents, agentsResponse);
+      const versionResponses = shouldRefreshVersions
+        ? await Promise.all(agentsResponse.map((agent) => fetchJson<AgentVersion[]>(`/agents/${agent.id}/versions`)))
+        : null;
 
       setAgents(agentsResponse);
-      setVersions(versionResponses.flat());
+      if (versionResponses) {
+        setVersions(versionResponses.flat());
+      }
       setPools(poolsResponse);
       setEventPresets(eventPresetsResponse);
       setTournaments(tournamentsResponse);
@@ -387,13 +394,9 @@ export default function App() {
     };
 
     void loadArena();
-    const timer = window.setInterval(() => {
-      void loadArena(true);
-    }, 3000);
 
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
     };
   }, [selectedPoolId]);
 

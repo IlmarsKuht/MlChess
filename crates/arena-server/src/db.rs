@@ -84,9 +84,7 @@ pub(crate) async fn init_db(db: &SqlitePool) -> Result<()> {
             status TEXT NOT NULL,
             created_at TEXT NOT NULL,
             FOREIGN KEY(tournament_id) REFERENCES tournaments(id) ON DELETE CASCADE,
-            FOREIGN KEY(pool_id) REFERENCES benchmark_pools(id) ON DELETE CASCADE,
-            FOREIGN KEY(white_version_id) REFERENCES agent_versions(id) ON DELETE CASCADE,
-            FOREIGN KEY(black_version_id) REFERENCES agent_versions(id) ON DELETE CASCADE
+            FOREIGN KEY(pool_id) REFERENCES benchmark_pools(id) ON DELETE CASCADE
         )",
         "CREATE TABLE IF NOT EXISTS games (
             id TEXT PRIMARY KEY,
@@ -331,7 +329,7 @@ async fn ensure_foreign_key_schema(db: &SqlitePool) -> Result<()> {
     let expected_counts = [
         ("agent_versions", 1_i64),
         ("tournaments", 1_i64),
-        ("match_series", 4_i64),
+        ("match_series", 2_i64),
         ("games", 5_i64),
         ("rating_snapshots", 2_i64),
         ("event_presets", 1_i64),
@@ -417,9 +415,7 @@ async fn ensure_foreign_key_schema(db: &SqlitePool) -> Result<()> {
             status TEXT NOT NULL,
             created_at TEXT NOT NULL,
             FOREIGN KEY(tournament_id) REFERENCES tournaments(id) ON DELETE CASCADE,
-            FOREIGN KEY(pool_id) REFERENCES benchmark_pools(id) ON DELETE CASCADE,
-            FOREIGN KEY(white_version_id) REFERENCES agent_versions(id) ON DELETE CASCADE,
-            FOREIGN KEY(black_version_id) REFERENCES agent_versions(id) ON DELETE CASCADE
+            FOREIGN KEY(pool_id) REFERENCES benchmark_pools(id) ON DELETE CASCADE
         )",
         "INSERT INTO match_series_new
             (id, tournament_id, pool_id, round_index, white_version_id, black_version_id, opening_id, game_index, status, created_at)
