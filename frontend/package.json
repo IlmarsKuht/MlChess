@@ -10,9 +10,11 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@tanstack/react-query": "^5.90.5",
     "chess.js": "^1.2.0",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "react-router-dom": "^7.9.4"
   },
   "devDependencies": {
     "@testing-library/react": "^16.3.2",
