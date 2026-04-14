@@ -1,4 +1,4 @@
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useConfirmedLiveMatch } from "./live";
@@ -184,5 +184,43 @@ describe("useConfirmedLiveMatch", () => {
       expect(result.current.snapshot?.seq).toBe(secondSnapshot.seq);
       expect(result.current.snapshot?.moves).toEqual(secondSnapshot.moves);
     });
+  });
+
+  it("does not reconnect after the match is already finished", async () => {
+    mocks.fetchJsonMock.mockResolvedValue(snapshot);
+    const { result } = renderHook(() => useConfirmedLiveMatch(snapshot.match_id));
+
+    expect(MockWebSocket.instances).toHaveLength(1);
+
+    const socket = MockWebSocket.instances[0];
+    await act(async () => {
+      socket.open();
+      socket.message(snapshot);
+      socket.message({
+        ...snapshot,
+        event_type: "game_finished",
+        seq: 2,
+        status: "finished",
+        result: "white_win",
+        termination: "timeout",
+        side_to_move: "none"
+      });
+    });
+
+    expect(result.current.snapshot?.status).toBe("finished");
+    expect(result.current.snapshot?.seq).toBe(2);
+
+    vi.useFakeTimers();
+    act(() => {
+      socket.onclose?.({
+        code: 1006,
+        reason: "",
+        wasClean: false
+      } as CloseEvent);
+      vi.advanceTimersByTime(1_500);
+    });
+
+    expect(MockWebSocket.instances).toHaveLength(1);
+    vi.useRealTimers();
   });
 });

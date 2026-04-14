@@ -28,7 +28,7 @@ import { BoardView, EmptyState, EngineSideCard, MoveList, StatCard, StatusBadge 
 import { DebugDrawer } from "../debug/DebugDrawer";
 import { useConfirmedLiveMatch } from "./live";
 import { useLivePlayback } from "./livePlayback";
-import { isPendingLiveWatchMatch, lastWatchedKey, liveClockElapsedMs } from "./model";
+import { isPendingLiveWatchMatch, isTerminalLiveStatus, lastWatchedKey, liveClockElapsedMs } from "./model";
 
 export function WatchPage() {
   const navigate = useNavigate();
@@ -63,7 +63,11 @@ export function WatchPage() {
       }
     : null;
 
-  const confirmedLiveMatch = useConfirmedLiveMatch(selectedLiveMatch?.watch_state === "live" ? matchId : "");
+  const shouldKeepConfirmedLiveMatch =
+    !!selectedLiveMatch &&
+    (selectedLiveMatch.watch_state === "live" ||
+      (selectedLiveMatch.watch_state === "replay" && !selectedWatchReplay));
+  const confirmedLiveMatch = useConfirmedLiveMatch(shouldKeepConfirmedLiveMatch ? matchId : "");
   const confirmedLiveSnapshot = confirmedLiveMatch.snapshot;
   const poolById = Object.fromEntries((pools.data ?? []).map((pool) => [pool.id, pool]));
   const poolNameById = Object.fromEntries((pools.data ?? []).map((pool) => [pool.id, pool.name]));
@@ -226,6 +230,7 @@ export function WatchPage() {
   const visibleLiveStatus = visibleLiveFrame?.status ?? "";
   const visibleLiveResult = visibleLiveFrame?.result ?? null;
   const visibleLiveTermination = visibleLiveFrame?.termination ?? null;
+  const terminalVisibleLive = isTerminalLiveStatus(visibleLiveStatus);
   const liveSideToMove = visibleLiveFrame?.side_to_move ?? "white";
   const liveWhiteParticipant = rawLiveGame?.white_participant ?? selectedLiveMatch?.white_participant ?? null;
   const liveBlackParticipant = rawLiveGame?.black_participant ?? selectedLiveMatch?.black_participant ?? null;
@@ -498,11 +503,13 @@ export function WatchPage() {
                   />
                 </div>
                 <div className="watch-live-controls">
-                  <StatusBadge tone={liveSideToMove === "white" ? "quiet" : "warning"}>
-                    {liveSideToMove === "white" ? "White to move" : "Black to move"}
+                  <StatusBadge tone={terminalVisibleLive ? "quiet" : liveSideToMove === "white" ? "quiet" : "warning"}>
+                    {terminalVisibleLive ? "Game finished" : liveSideToMove === "white" ? "White to move" : "Black to move"}
                   </StatusBadge>
                   <span className="subtle">
-                    {interactiveLive
+                    {terminalVisibleLive
+                      ? "Game finished. Replay details are loading."
+                      : interactiveLive
                       ? rawLiveGame.human_turn
                         ? isSubmittingHumanMove
                           ? "Submitting move..."

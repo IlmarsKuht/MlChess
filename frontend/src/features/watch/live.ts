@@ -125,6 +125,10 @@ function isMissingLiveStateError(error: string) {
   return /^live state for match [0-9a-f-]+ not found$/i.test(error.trim());
 }
 
+function isTerminalSnapshot(snapshot: LiveMatchSnapshot | null | undefined) {
+  return snapshot?.status === "finished" || snapshot?.status === "aborted";
+}
+
 function reduceEvent(current: ConfirmedLiveState | null, event: LiveProtocolEvent): ReduceResult {
   if (event.event_type === "snapshot") {
     if (current?.snapshot && event.seq <= current.snapshot.seq) {
@@ -379,7 +383,9 @@ export function useConfirmedLiveMatch(matchId: string) {
               // Snapshot bootstrap is best-effort; reconnect loop keeps trying the socket.
             });
           }
-          scheduleReconnect();
+          if (!isTerminalSnapshot(stateRef.current?.snapshot)) {
+            scheduleReconnect();
+          }
         }
       };
     };
