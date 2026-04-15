@@ -22,7 +22,7 @@ use crate::{
     presentation::{
         ApiGameRecord, ApiLeaderboardEntry, ApiMatchSeries, HumanPlayerProfile, ReplayPayload,
         api_game_record, api_leaderboard_entry, api_match_series, participant_for_id,
-        resolve_match_lifecycle, version_name_by_id,
+        resolve_match_lifecycle, resolve_tournament_status, version_name_by_id,
     },
     registry::sync_setup_registry_if_changed,
     state::AppState,
@@ -277,7 +277,56 @@ async fn get_event_preset_handler(
 async fn list_tournaments_handler(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<arena_core::Tournament>>, ApiError> {
-    Ok(Json(list_tournaments(&state.db).await?))
+    let tournaments = list_tournaments(&state.db).await?;
+    let matches = list_match_series(&state.db, None).await?;
+    let games = list_games(&state.db, None, None).await?;
+    let checkpoints = list_live_runtime_checkpoints(&state.db, None).await?;
+    let game_id_by_match_id = games
+        .into_iter()
+        .map(|game| (game.match_id, game.id))
+        .collect::<std::collections::HashMap<_, _>>();
+    let checkpoint_by_match_id = checkpoints
+        .into_iter()
+        .map(|checkpoint| (checkpoint.match_id, checkpoint))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut match_statuses_by_tournament_id: std::collections::HashMap<
+        Uuid,
+        Vec<arena_core::MatchStatus>,
+    > = std::collections::HashMap::new();
+    let tournament_status_by_id = tournaments
+        .iter()
+        .map(|tournament| (tournament.id, tournament.status))
+        .collect::<std::collections::HashMap<_, _>>();
+    for series in &matches {
+        let (status, _, _) = resolve_match_lifecycle(
+            series,
+            tournament_status_by_id
+                .get(&series.tournament_id)
+                .copied()
+                .unwrap_or(arena_core::TournamentStatus::Running),
+            game_id_by_match_id.get(&series.id).copied(),
+            checkpoint_by_match_id.get(&series.id),
+        );
+        match_statuses_by_tournament_id
+            .entry(series.tournament_id)
+            .or_default()
+            .push(status);
+    }
+
+    Ok(Json(
+        tournaments
+            .into_iter()
+            .map(|mut tournament| {
+                if let Some(match_statuses) = match_statuses_by_tournament_id.get(&tournament.id) {
+                    tournament.status =
+                        resolve_tournament_status(&tournament, match_statuses, Utc::now());
+                } else {
+                    tournament.status = resolve_tournament_status(&tournament, &[], Utc::now());
+                }
+                tournament
+            })
+            .collect(),
+    ))
 }
 
 async fn get_tournament_handler(
@@ -429,6 +478,11 @@ async fn list_matches_handler(
     let versions = list_agent_versions(&state.db, None).await?;
     let version_name_by_id = version_name_by_id(&versions);
     let human_player = ensure_human_player(&state.db).await?;
+    let tournament_status_by_id = list_tournaments(&state.db)
+        .await?
+        .into_iter()
+        .map(|tournament| (tournament.id, tournament.status))
+        .collect::<std::collections::HashMap<_, _>>();
     let games = list_games(&state.db, query.tournament_id, None).await?;
     let checkpoints = list_live_runtime_checkpoints(&state.db, None).await?;
     let game_id_by_match_id = games
@@ -447,6 +501,10 @@ async fn list_matches_handler(
                 || series.black_version_id == human_player.id;
             let (status, watch_state, game_id) = resolve_match_lifecycle(
                 &series,
+                tournament_status_by_id
+                    .get(&series.tournament_id)
+                    .copied()
+                    .unwrap_or(arena_core::TournamentStatus::Running),
                 game_id_by_match_id.get(&series.id).copied(),
                 checkpoint_by_match_id.get(&series.id),
             );
@@ -1709,6 +1767,213 @@ mod tests {
             first.get("watch_state").and_then(Value::as_str),
             Some("unavailable")
         );
+    }
+
+    #[tokio::test]
+    async fn list_matches_marks_pending_rows_as_skipped_for_completed_tournaments() {
+        let state = setup_state().await;
+        let app = crate::build_app(state.clone());
+        let pool = crate::storage::list_pools(&state.db)
+            .await
+            .unwrap()
+            .remove(0);
+        let mut versions = crate::storage::list_agent_versions(&state.db, None)
+            .await
+            .unwrap();
+        let white = versions.remove(0);
+        let black = versions.remove(0);
+        let tournament = arena_core::Tournament {
+            id: Uuid::new_v4(),
+            name: "completed".to_string(),
+            kind: arena_core::TournamentKind::RoundRobin,
+            pool_id: pool.id,
+            participant_version_ids: vec![white.id, black.id],
+            worker_count: 1,
+            games_per_pairing: 1,
+            status: arena_core::TournamentStatus::Completed,
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            completed_at: Some(Utc::now()),
+        };
+        crate::storage::insert_tournament(&state.db, &tournament)
+            .await
+            .unwrap();
+        crate::storage::insert_match_series(
+            &state.db,
+            &arena_core::MatchSeries {
+                id: Uuid::new_v4(),
+                tournament_id: tournament.id,
+                pool_id: pool.id,
+                round_index: 0,
+                white_version_id: white.id,
+                black_version_id: black.id,
+                opening_id: None,
+                game_index: 1,
+                status: arena_core::MatchStatus::Pending,
+                created_at: Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/matches")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let first = payload.as_array().and_then(|items| items.first()).unwrap();
+        assert_eq!(first.get("status").and_then(Value::as_str), Some("skipped"));
+        assert_eq!(
+            first.get("watch_state").and_then(Value::as_str),
+            Some("unavailable")
+        );
+    }
+
+    #[tokio::test]
+    async fn list_tournaments_resolves_running_rows_with_completed_matches() {
+        let state = setup_state().await;
+        let app = crate::build_app(state.clone());
+        let pool = crate::storage::list_pools(&state.db)
+            .await
+            .unwrap()
+            .remove(0);
+        let mut versions = crate::storage::list_agent_versions(&state.db, None)
+            .await
+            .unwrap();
+        let white = versions.remove(0);
+        let black = versions.remove(0);
+        let tournament = arena_core::Tournament {
+            id: Uuid::new_v4(),
+            name: "stale running".to_string(),
+            kind: arena_core::TournamentKind::RoundRobin,
+            pool_id: pool.id,
+            participant_version_ids: vec![white.id, black.id],
+            worker_count: 1,
+            games_per_pairing: 1,
+            status: arena_core::TournamentStatus::Running,
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            completed_at: None,
+        };
+        crate::storage::insert_tournament(&state.db, &tournament)
+            .await
+            .unwrap();
+        let series = arena_core::MatchSeries {
+            id: Uuid::new_v4(),
+            tournament_id: tournament.id,
+            pool_id: pool.id,
+            round_index: 0,
+            white_version_id: white.id,
+            black_version_id: black.id,
+            opening_id: None,
+            game_index: 0,
+            status: arena_core::MatchStatus::Completed,
+            created_at: Utc::now(),
+        };
+        crate::storage::insert_match_series(&state.db, &series)
+            .await
+            .unwrap();
+        crate::storage::insert_game(
+            &state.db,
+            &arena_core::GameRecord {
+                id: Uuid::new_v4(),
+                tournament_id: tournament.id,
+                match_id: series.id,
+                pool_id: pool.id,
+                variant: pool.variant,
+                opening_id: None,
+                white_version_id: white.id,
+                black_version_id: black.id,
+                result: arena_core::GameResult::WhiteWin,
+                termination: arena_core::GameTermination::Checkmate,
+                start_fen: "startpos".to_string(),
+                pgn: String::new(),
+                moves_uci: vec!["e2e4".to_string()],
+                white_time_left_ms: pool.time_control.initial_ms,
+                black_time_left_ms: pool.time_control.initial_ms,
+                logs: Vec::new(),
+                started_at: Utc::now(),
+                completed_at: Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/tournaments")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let first = payload.as_array().and_then(|items| items.first()).unwrap();
+        assert_eq!(first.get("status").and_then(Value::as_str), Some("completed"));
+    }
+
+    #[tokio::test]
+    async fn list_tournaments_marks_stale_zero_match_running_tournament_failed() {
+        let state = setup_state().await;
+        let app = crate::build_app(state.clone());
+        let pool = crate::storage::list_pools(&state.db)
+            .await
+            .unwrap()
+            .remove(0);
+        let mut versions = crate::storage::list_agent_versions(&state.db, None)
+            .await
+            .unwrap();
+        let white = versions.remove(0);
+        let black = versions.remove(0);
+        crate::storage::insert_tournament(
+            &state.db,
+            &arena_core::Tournament {
+                id: Uuid::new_v4(),
+                name: "ghost".to_string(),
+                kind: arena_core::TournamentKind::RoundRobin,
+                pool_id: pool.id,
+                participant_version_ids: vec![white.id, black.id],
+                worker_count: 1,
+                games_per_pairing: 1,
+                status: arena_core::TournamentStatus::Running,
+                created_at: Utc::now() - chrono::Duration::seconds(31),
+                started_at: Some(Utc::now() - chrono::Duration::seconds(31)),
+                completed_at: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/tournaments")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let first = payload.as_array().and_then(|items| items.first()).unwrap();
+        assert_eq!(first.get("status").and_then(Value::as_str), Some("failed"));
     }
 
     #[tokio::test]

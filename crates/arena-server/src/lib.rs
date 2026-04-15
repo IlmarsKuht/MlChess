@@ -16,6 +16,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use arena_core::{LiveResult, LiveStatus, LiveTermination, ProtocolLiveSide};
+use chrono::Utc;
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
@@ -28,7 +29,7 @@ use axum::{
 use db::init_db;
 use live::LiveMatchStore;
 use orchestration::{restore_engine_game, restore_human_game};
-use presentation::resolve_match_lifecycle;
+use presentation::{resolve_match_lifecycle, resolve_tournament_status};
 use registry::{SetupRegistryCache, sync_setup_registry_if_changed};
 use serde_json::{Value, json};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -109,6 +110,10 @@ pub async fn run_server(
         setup_registry,
     };
     restore_live_runtime(&state).await?;
+    let reconciled = reconcile_history_statuses(&state.db).await?;
+    if reconciled > 0 {
+        info!(updated_rows = reconciled, "reconciled stale tournament history rows");
+    }
     let app = build_app(state);
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
     info!("arena server listening on http://{bind_addr}");
@@ -129,32 +134,120 @@ pub async fn cleanup_stale_match_statuses(db_url: &str) -> Result<u64> {
         .with_context(|| format!("failed to connect to {db_url}"))?;
     sqlx::query("PRAGMA foreign_keys = ON").execute(&db).await?;
     init_db(&db).await?;
+    reconcile_history_statuses(&db).await
+}
 
-    let match_series = crate::storage::list_match_series(&db, None).await?;
-    let games = crate::storage::list_games(&db, None, None).await?;
-    let checkpoints = crate::storage::list_live_runtime_checkpoints(&db, None).await?;
-    let game_id_by_match_id = games
+async fn reconcile_history_statuses(db: &sqlx::SqlitePool) -> Result<u64> {
+    let tournaments = crate::storage::list_tournaments(db).await?;
+    let match_series = crate::storage::list_match_series(db, None).await?;
+    let games = crate::storage::list_games(db, None, None).await?;
+    let checkpoints = crate::storage::list_live_runtime_checkpoints(db, None).await?;
+    let game_by_match_id = games
         .into_iter()
-        .map(|game| (game.match_id, game.id))
+        .map(|game| (game.match_id, game))
         .collect::<std::collections::HashMap<_, _>>();
     let checkpoint_by_match_id = checkpoints
         .into_iter()
         .map(|checkpoint| (checkpoint.match_id, checkpoint))
         .collect::<std::collections::HashMap<_, _>>();
-
+    let tournament_by_id = tournaments
+        .iter()
+        .map(|tournament| (tournament.id, tournament))
+        .collect::<std::collections::HashMap<_, _>>();
+    let now = Utc::now();
+    let stale_cutoff = now - chrono::Duration::seconds(30);
     let mut updated = 0_u64;
+    let mut match_statuses_by_tournament_id: std::collections::HashMap<
+        Uuid,
+        Vec<arena_core::MatchStatus>,
+    > = std::collections::HashMap::new();
+    let mut tournament_completed_at: std::collections::HashMap<Uuid, chrono::DateTime<Utc>> =
+        std::collections::HashMap::new();
+
     for series in match_series {
-        let (resolved_status, _, _) = resolve_match_lifecycle(
+        let tournament = match tournament_by_id.get(&series.tournament_id) {
+            Some(value) => *value,
+            None => continue,
+        };
+        let game = game_by_match_id.get(&series.id);
+        let checkpoint = checkpoint_by_match_id.get(&series.id);
+        let (mut resolved_status, _, _) = resolve_match_lifecycle(
             &series,
-            game_id_by_match_id.get(&series.id).copied(),
-            checkpoint_by_match_id.get(&series.id),
+            tournament.status,
+            game.map(|value| value.id),
+            checkpoint,
         );
-        if resolved_status == series.status {
+        if game.is_none()
+            && checkpoint.is_none()
+            && series.created_at <= stale_cutoff
+            && tournament.status != arena_core::TournamentStatus::Draft
+        {
+            resolved_status = match series.status {
+                arena_core::MatchStatus::Pending => arena_core::MatchStatus::Skipped,
+                arena_core::MatchStatus::Running => arena_core::MatchStatus::Failed,
+                status => status,
+            };
+        }
+
+        if resolved_status != series.status {
+            crate::storage::update_match_series_status(db, series.id, resolved_status).await?;
+            updated += 1;
+        }
+        match_statuses_by_tournament_id
+            .entry(series.tournament_id)
+            .or_default()
+            .push(resolved_status);
+        if let Some(completed_at) = game.map(|value| value.completed_at).or_else(|| {
+            checkpoint.and_then(|value| {
+                (value.status != arena_core::LiveStatus::Running).then_some(value.updated_at)
+            })
+        }) {
+            tournament_completed_at
+                .entry(series.tournament_id)
+                .and_modify(|existing| {
+                    if completed_at > *existing {
+                        *existing = completed_at;
+                    }
+                })
+                .or_insert(completed_at);
+        }
+    }
+
+    for tournament in tournaments {
+        let empty = Vec::new();
+        let match_statuses = match_statuses_by_tournament_id
+            .get(&tournament.id)
+            .unwrap_or(&empty);
+        let resolved_status = resolve_tournament_status(&tournament, match_statuses, now);
+        if resolved_status == tournament.status {
             continue;
         }
-        crate::storage::update_match_series_status(&db, series.id, resolved_status).await?;
+        let completed_at = if matches!(
+            resolved_status,
+            arena_core::TournamentStatus::Completed
+                | arena_core::TournamentStatus::Failed
+                | arena_core::TournamentStatus::Stopped
+        ) {
+            Some(
+                tournament
+                    .completed_at
+                    .or_else(|| tournament_completed_at.get(&tournament.id).copied())
+                    .unwrap_or(now),
+            )
+        } else {
+            tournament.completed_at
+        };
+        crate::storage::update_tournament_status(
+            db,
+            tournament.id,
+            resolved_status,
+            tournament.started_at,
+            completed_at,
+        )
+        .await?;
         updated += 1;
     }
+
     Ok(updated)
 }
 
@@ -949,6 +1042,170 @@ mod tests {
                 .status,
             MatchStatus::Completed
         );
+
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[tokio::test]
+    async fn cleanup_stale_match_statuses_terminalizes_orphaned_rows() {
+        let temp_path = std::env::temp_dir().join(format!("mlchess-cleanup-{}.db", Uuid::new_v4()));
+        let db_path = temp_path.to_string_lossy().replace('\\', "/");
+        let db_url = if db_path.starts_with('/') {
+            format!("sqlite://{db_path}")
+        } else {
+            format!("sqlite:///{db_path}")
+        };
+        let db_options = db_url
+            .parse::<SqliteConnectOptions>()
+            .unwrap()
+            .create_if_missing(true)
+            .foreign_keys(true);
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(db_options)
+            .await
+            .unwrap();
+        init_db(&db).await.unwrap();
+        let setup_registry = SetupRegistryCache::default();
+        sync_setup_registry_if_changed(&db, &setup_registry)
+            .await
+            .unwrap();
+
+        let pool = list_pools(&db).await.unwrap().remove(0);
+        let mut versions = list_agent_versions(&db, None).await.unwrap();
+        let white = versions.remove(0);
+        let black = versions.remove(0);
+        let created_at = Utc::now() - chrono::Duration::seconds(31);
+        let tournament = Tournament {
+            id: Uuid::new_v4(),
+            name: "orphaned".to_string(),
+            kind: TournamentKind::RoundRobin,
+            pool_id: pool.id,
+            participant_version_ids: vec![white.id, black.id],
+            worker_count: 1,
+            games_per_pairing: 1,
+            status: TournamentStatus::Running,
+            created_at,
+            started_at: Some(created_at),
+            completed_at: None,
+        };
+        insert_tournament(&db, &tournament).await.unwrap();
+
+        let running_match_id = Uuid::new_v4();
+        insert_match_series(
+            &db,
+            &MatchSeries {
+                id: running_match_id,
+                tournament_id: tournament.id,
+                pool_id: pool.id,
+                round_index: 0,
+                white_version_id: white.id,
+                black_version_id: black.id,
+                opening_id: None,
+                game_index: 0,
+                status: MatchStatus::Running,
+                created_at,
+            },
+        )
+        .await
+        .unwrap();
+        let pending_match_id = Uuid::new_v4();
+        insert_match_series(
+            &db,
+            &MatchSeries {
+                id: pending_match_id,
+                tournament_id: tournament.id,
+                pool_id: pool.id,
+                round_index: 0,
+                white_version_id: black.id,
+                black_version_id: white.id,
+                opening_id: None,
+                game_index: 1,
+                status: MatchStatus::Pending,
+                created_at,
+            },
+        )
+        .await
+        .unwrap();
+
+        let updated = cleanup_stale_match_statuses(&db_url).await.unwrap();
+        assert_eq!(updated, 3);
+        assert_eq!(
+            crate::storage::get_match_series(&db, running_match_id)
+                .await
+                .unwrap()
+                .status,
+            MatchStatus::Failed
+        );
+        assert_eq!(
+            crate::storage::get_match_series(&db, pending_match_id)
+                .await
+                .unwrap()
+                .status,
+            MatchStatus::Skipped
+        );
+        assert_eq!(
+            crate::storage::get_tournament(&db, tournament.id)
+                .await
+                .unwrap()
+                .status,
+            TournamentStatus::Failed
+        );
+
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[tokio::test]
+    async fn cleanup_stale_match_statuses_fails_stale_zero_match_tournaments() {
+        let temp_path = std::env::temp_dir().join(format!("mlchess-cleanup-{}.db", Uuid::new_v4()));
+        let db_path = temp_path.to_string_lossy().replace('\\', "/");
+        let db_url = if db_path.starts_with('/') {
+            format!("sqlite://{db_path}")
+        } else {
+            format!("sqlite:///{db_path}")
+        };
+        let db_options = db_url
+            .parse::<SqliteConnectOptions>()
+            .unwrap()
+            .create_if_missing(true)
+            .foreign_keys(true);
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(db_options)
+            .await
+            .unwrap();
+        init_db(&db).await.unwrap();
+        let setup_registry = SetupRegistryCache::default();
+        sync_setup_registry_if_changed(&db, &setup_registry)
+            .await
+            .unwrap();
+
+        let pool = list_pools(&db).await.unwrap().remove(0);
+        let mut versions = list_agent_versions(&db, None).await.unwrap();
+        let white = versions.remove(0);
+        let black = versions.remove(0);
+        let created_at = Utc::now() - chrono::Duration::seconds(31);
+        let tournament = Tournament {
+            id: Uuid::new_v4(),
+            name: "ghost".to_string(),
+            kind: TournamentKind::RoundRobin,
+            pool_id: pool.id,
+            participant_version_ids: vec![white.id, black.id],
+            worker_count: 1,
+            games_per_pairing: 1,
+            status: TournamentStatus::Running,
+            created_at,
+            started_at: Some(created_at),
+            completed_at: None,
+        };
+        insert_tournament(&db, &tournament).await.unwrap();
+
+        let updated = cleanup_stale_match_statuses(&db_url).await.unwrap();
+        assert_eq!(updated, 1);
+        let refreshed = crate::storage::get_tournament(&db, tournament.id)
+            .await
+            .unwrap();
+        assert_eq!(refreshed.status, TournamentStatus::Failed);
 
         let _ = std::fs::remove_file(temp_path);
     }

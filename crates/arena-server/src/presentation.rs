@@ -2,9 +2,9 @@ use std::collections::HashMap;
 
 use arena_core::{
     AgentVersion, GameRecord, GameResult, LeaderboardEntry, LiveRuntimeCheckpoint, LiveStatus,
-    MatchSeries, MatchStatus, Variant,
+    MatchSeries, MatchStatus, TournamentStatus, Variant,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -183,6 +183,7 @@ pub(crate) fn api_match_series(
 
 pub(crate) fn resolve_match_lifecycle(
     series: &MatchSeries,
+    tournament_status: TournamentStatus,
     game_id: Option<Uuid>,
     checkpoint: Option<&LiveRuntimeCheckpoint>,
 ) -> (MatchStatus, ApiMatchWatchState, Option<Uuid>) {
@@ -214,6 +215,18 @@ pub(crate) fn resolve_match_lifecycle(
         };
     }
 
+    if matches!(
+        tournament_status,
+        TournamentStatus::Completed | TournamentStatus::Failed | TournamentStatus::Stopped
+    ) {
+        let terminal_status = match series.status {
+            MatchStatus::Pending => MatchStatus::Skipped,
+            MatchStatus::Running => MatchStatus::Failed,
+            status => status,
+        };
+        return (terminal_status, ApiMatchWatchState::Unavailable, game_id);
+    }
+
     let watch_state = match series.status {
         MatchStatus::Completed => ApiMatchWatchState::Replay,
         MatchStatus::Running => ApiMatchWatchState::Unavailable,
@@ -221,6 +234,44 @@ pub(crate) fn resolve_match_lifecycle(
         MatchStatus::Pending => ApiMatchWatchState::Unavailable,
     };
     (series.status, watch_state, game_id)
+}
+
+pub(crate) fn resolve_tournament_status(
+    tournament: &arena_core::Tournament,
+    match_statuses: &[MatchStatus],
+    now: DateTime<Utc>,
+) -> TournamentStatus {
+    let tournament_status = tournament.status;
+    if tournament_status == TournamentStatus::Draft || match_statuses.is_empty() {
+        if tournament_status == TournamentStatus::Running
+            && match_statuses.is_empty()
+            && tournament.created_at <= now - Duration::seconds(30)
+        {
+            return TournamentStatus::Failed;
+        }
+        return tournament_status;
+    }
+
+    if match_statuses
+        .iter()
+        .any(|status| matches!(status, MatchStatus::Running | MatchStatus::Pending))
+    {
+        return tournament_status;
+    }
+
+    if tournament_status == TournamentStatus::Stopped {
+        return TournamentStatus::Stopped;
+    }
+
+    if tournament_status == TournamentStatus::Failed
+        || match_statuses
+            .iter()
+            .any(|status| *status == MatchStatus::Failed)
+    {
+        return TournamentStatus::Failed;
+    }
+
+    TournamentStatus::Completed
 }
 
 pub(crate) fn api_game_record(

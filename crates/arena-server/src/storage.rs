@@ -418,6 +418,20 @@ fn event_preset_from_row(row: sqlx::sqlite::SqliteRow) -> Result<EventPreset> {
 }
 
 pub(crate) async fn insert_tournament(db: &SqlitePool, tournament: &Tournament) -> Result<()> {
+    insert_tournament_with_executor(db, tournament).await
+}
+
+pub(crate) async fn insert_tournament_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    tournament: &Tournament,
+) -> Result<()> {
+    insert_tournament_with_executor(&mut **tx, tournament).await
+}
+
+async fn insert_tournament_with_executor<'e, E>(executor: E, tournament: &Tournament) -> Result<()>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
     sqlx::query(
         "INSERT INTO tournaments (
             id, name, kind, pool_id, participant_version_ids, worker_count, games_per_pairing, status, created_at, started_at, completed_at
@@ -434,7 +448,7 @@ pub(crate) async fn insert_tournament(db: &SqlitePool, tournament: &Tournament) 
     .bind(ts(tournament.created_at))
     .bind(tournament.started_at.map(ts))
     .bind(tournament.completed_at.map(ts))
-    .execute(db)
+    .execute(executor)
     .await?;
     Ok(())
 }
@@ -507,6 +521,20 @@ fn tournament_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Tournament> {
 }
 
 pub(crate) async fn insert_match_series(db: &SqlitePool, series: &MatchSeries) -> Result<()> {
+    insert_match_series_with_executor(db, series).await
+}
+
+pub(crate) async fn insert_match_series_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    series: &MatchSeries,
+) -> Result<()> {
+    insert_match_series_with_executor(&mut **tx, series).await
+}
+
+async fn insert_match_series_with_executor<'e, E>(executor: E, series: &MatchSeries) -> Result<()>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
     sqlx::query(
         "INSERT INTO match_series (
             id, tournament_id, pool_id, round_index, white_version_id, black_version_id, opening_id, game_index, status, created_at
@@ -522,7 +550,7 @@ pub(crate) async fn insert_match_series(db: &SqlitePool, series: &MatchSeries) -
     .bind(series.game_index as i64)
     .bind(encode_json(&series.status)?)
     .bind(ts(series.created_at))
-    .execute(db)
+    .execute(executor)
     .await?;
     Ok(())
 }

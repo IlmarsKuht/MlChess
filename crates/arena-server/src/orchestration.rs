@@ -43,9 +43,10 @@ use crate::{
         ensure_agent_version_exists, ensure_human_player, ensure_leaderboard_seed,
         ensure_pool_exists, get_agent_version, get_match_series, get_pool, get_tournament,
         insert_game_tx, insert_human_game_tx, insert_human_rating_snapshot,
-        insert_live_runtime_event_tx, insert_match_series, insert_rating_snapshot,
-        insert_tournament, list_agent_versions, list_agent_versions_by_ids, load_human_profile,
-        load_pool_leaderboard, load_pool_openings, update_match_series_status,
+        insert_live_runtime_event_tx, insert_match_series, insert_match_series_tx,
+        insert_rating_snapshot, insert_tournament, insert_tournament_tx, list_agent_versions,
+        list_agent_versions_by_ids, load_human_profile, load_pool_leaderboard, load_pool_openings,
+        update_match_series_status,
         update_match_series_status_tx, update_tournament_status, update_tournament_status_tx,
         upsert_live_runtime_checkpoint_tx,
     },
@@ -131,7 +132,6 @@ pub(crate) async fn create_human_game(
         started_at: Some(created_at),
         completed_at: None,
     };
-    insert_tournament(&state.db, &tournament).await?;
     let match_series = MatchSeries {
         id: match_id,
         tournament_id,
@@ -152,7 +152,10 @@ pub(crate) async fn create_human_game(
         status: MatchStatus::Running,
         created_at,
     };
-    insert_match_series(&state.db, &match_series).await?;
+    let mut tx = state.db.begin().await?;
+    insert_tournament_tx(&mut tx, &tournament).await?;
+    insert_match_series_tx(&mut tx, &match_series).await?;
+    tx.commit().await?;
     let mut logs = Vec::new();
     let mut engine = build_adapter(engine_version);
     engine.prepare(pool.variant, &mut logs).await?;
