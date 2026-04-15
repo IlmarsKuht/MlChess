@@ -1,6 +1,6 @@
 registry_key = "starter-standard-pool"
-name = "Starter Standard Pool"
-description = "Bundled baseline pool: standard chess, 60s + 1s, paired colors, starter openings."
+name = "Bullet 1+1"
+description = "Popular short control: standard chess, 1 minute with 1-second increment, paired colors, starter openings."
 variant = "standard"
 initial_ms = 60000
 increment_ms = 1000

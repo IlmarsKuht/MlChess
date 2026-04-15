@@ -1,0 +1,11 @@
+registry_key = "standard-hyperbullet-30-0"
+name = "HyperBullet 30+0"
+description = "Ultra-fast standard chess: 30 seconds with no increment, paired colors, starter openings."
+variant = "standard"
+initial_ms = 30000
+increment_ms = 0
+paired_games = true
+swap_colors = true
+opening_suite_key = "starter-benchmark-suite"
+opening_seed = 7
+active = true

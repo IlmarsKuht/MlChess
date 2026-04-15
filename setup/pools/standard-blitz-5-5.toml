@@ -1,0 +1,11 @@
+registry_key = "standard-blitz-5-5"
+name = "Blitz 5+5"
+description = "Popular short control: standard chess, 5 minutes with 5-second increment, paired colors, starter openings."
+variant = "standard"
+initial_ms = 300000
+increment_ms = 5000
+paired_games = true
+swap_colors = true
+opening_suite_key = "starter-benchmark-suite"
+opening_seed = 7
+active = true

@@ -1,0 +1,11 @@
+registry_key = "standard-blitz-2-0"
+name = "Blitz 2+0"
+description = "Popular short control: standard chess, 2 minutes with no increment, paired colors, starter openings."
+variant = "standard"
+initial_ms = 120000
+increment_ms = 0
+paired_games = true
+swap_colors = true
+opening_suite_key = "starter-benchmark-suite"
+opening_seed = 7
+active = true

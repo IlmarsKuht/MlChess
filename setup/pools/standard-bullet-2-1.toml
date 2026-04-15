@@ -1,0 +1,11 @@
+registry_key = "standard-bullet-2-1"
+name = "Bullet 2+1"
+description = "Popular short control: standard chess, 2 minutes with 1-second increment, paired colors, starter openings."
+variant = "standard"
+initial_ms = 120000
+increment_ms = 1000
+paired_games = true
+swap_colors = true
+opening_suite_key = "starter-benchmark-suite"
+opening_seed = 7
+active = true
