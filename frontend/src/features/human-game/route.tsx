@@ -83,7 +83,8 @@ export function HumanGamePage() {
       </div>
       <p className="panel-copy">
         Pick any engine, choose your side, and play a live standard game that updates both your Elo and the
-        engine&apos;s Elo.
+        engine&apos;s Elo. After launch you&apos;ll land on the fullscreen board with clocks, move list, and a clearer
+        end-of-game result screen.
       </p>
 
       <form className="stack" onSubmit={submitHumanGame}>
@@ -147,6 +148,11 @@ export function HumanGamePage() {
                   : versionNameById[humanEngineId] ?? "Choose an engine"
             }
           />
+        </div>
+
+        <div className="result-strip">
+          <strong>What happens next</strong>
+          <span>Start the game, play on the big board, and get an obvious winner or draw screen when it ends.</span>
         </div>
 
         <div className="result-strip">

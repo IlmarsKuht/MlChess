@@ -112,7 +112,8 @@ export function LiveDuelPage() {
         </div>
         <p className="panel-copy">
           Pick any two engines, start one live game immediately, and then open the fullscreen watch page to
-          follow it comfortably.
+          follow it comfortably. The watch view now leans harder into time pressure and makes the finish state
+          unmistakable.
         </p>
 
         <form className="stack" onSubmit={submitLiveDuel}>
@@ -162,8 +163,8 @@ export function LiveDuelPage() {
           </div>
 
           <div className="result-strip">
-            <strong>Match setup</strong>
-            <span>Manual live duel still starts exactly 1 game by default.</span>
+            <strong>What happens next</strong>
+            <span>Launch the duel, jump into fullscreen, and follow the clocks, latest move, and clear final result.</span>
           </div>
 
           <button type="submit" disabled={createDuel.isPending}>Start live duel</button>
@@ -177,7 +178,7 @@ export function LiveDuelPage() {
         </div>
         <p className="panel-copy">
           Choose a live match and open the dedicated watch page instead of squeezing the board into this control
-          screen.
+          screen. Active games now show stronger urgency cues, and finished ones are easier to spot and review.
         </p>
 
         {resumableMatch ? (

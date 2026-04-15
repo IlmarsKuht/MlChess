@@ -40,7 +40,7 @@ export function OverviewPage() {
         </div>
         <p className="panel-copy">
           Check what is live, browse featured engines, and jump straight into duels, the tournament map, or
-          finished games.
+          finished games. The fastest paths below are tuned for “watch something now” and “review the latest result.”
         </p>
         <div className="summary-grid">
           <div className="summary-card">
@@ -70,7 +70,7 @@ export function OverviewPage() {
             Browse engines
           </button>
           <button type="button" className="button-ghost" onClick={() => navigate("/live-duel")}>
-            Start live duel
+            Watch live duel
           </button>
           <button type="button" className="button-ghost" onClick={() => navigate("/play-engine")}>
             Play vs engine
@@ -82,7 +82,7 @@ export function OverviewPage() {
             Open tournament map
           </button>
           <button type="button" className="button-ghost" onClick={() => navigate("/replay")}>
-            Watch replay
+            Review latest replay
           </button>
         </div>
       </section>
@@ -90,7 +90,7 @@ export function OverviewPage() {
       <section className="panel">
         <div className="panel-header">
           <h2>Recent Games</h2>
-          <span>{recentGames.length} latest</span>
+          <span>{recentGames.length} latest finishes</span>
         </div>
         {recentGames.length === 0 ? (
           <EmptyState>No finished games yet. Start an event and activity will show up here.</EmptyState>

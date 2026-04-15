@@ -1,6 +1,6 @@
-import { render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { WatchPage } from "./route";
 import type { GameRecord, LiveMatchSnapshot, MatchSeries, Tournament } from "../../app/types";
@@ -117,7 +117,42 @@ const tournament: Tournament = {
   completed_at: "2026-04-14T18:48:22.000Z"
 };
 
+const runningMatch: MatchSeries = {
+  ...match,
+  id: "running-match",
+  status: "running",
+  watch_state: "live",
+  game_id: null,
+  interactive: false,
+  black_participant: {
+    kind: "engine_version",
+    id: "black-version",
+    display_name: "Engine Black"
+  }
+};
+
+const runningSnapshot: LiveMatchSnapshot = {
+  match_id: runningMatch.id,
+  protocol_version: 1,
+  event_type: "snapshot",
+  seq: 11,
+  server_now_unix_ms: 1776192502055,
+  status: "running",
+  result: "none",
+  termination: "none",
+  fen: "rnbqkbnr/pppp1ppp/8/4p3/3P4/5N2/PPP1PPPP/RNBQKB1R b KQkq - 1 2",
+  moves: ["d2d4", "e7e5", "g1f3"],
+  white_remaining_ms: 4800,
+  black_remaining_ms: 32000,
+  side_to_move: "white",
+  turn_started_server_unix_ms: 1776192502055
+};
+
 describe("WatchPage", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
   it("keeps showing the finished board while replay data is still loading", () => {
     mocks.useMatchesQueryMock.mockReturnValue({ data: [match] });
     mocks.useGamesQueryMock.mockReturnValue({ data: [] satisfies GameRecord[] });
@@ -174,8 +209,69 @@ describe("WatchPage", () => {
     );
 
     expect(screen.queryByText("Loading match viewer.")).toBeNull();
-    expect(screen.getByText("Game finished")).toBeTruthy();
-    expect(screen.getByText("Game finished. Replay details are loading.")).toBeTruthy();
+    expect(screen.getAllByText("White wins")[0]).toBeTruthy();
+    expect(screen.getByText("White takes the point by Timeout.")).toBeTruthy();
+    expect(screen.getByText("Replay details are loading while the final position stays on screen.")).toBeTruthy();
     expect(screen.getByText("Moves")).toBeTruthy();
+  });
+
+  it("shows critical urgency only for the active low-time side", () => {
+    mocks.useMatchesQueryMock.mockReturnValue({ data: [runningMatch] });
+    mocks.useGamesQueryMock.mockReturnValue({ data: [] satisfies GameRecord[] });
+    mocks.usePoolsQueryMock.mockReturnValue({
+      data: [
+        {
+          id: runningMatch.pool_id,
+          name: "Rapid Standard",
+          description: null,
+          variant: "standard",
+          time_control: { initial_ms: 60000, increment_ms: 0 },
+          fairness: { paired_games: false, swap_colors: false, opening_suite_id: null, opening_seed: null }
+        }
+      ]
+    });
+    mocks.useTournamentsQueryMock.mockReturnValue({ data: [tournament] });
+    mocks.useConfirmedLiveMatchMock.mockReturnValue({
+      snapshot: runningSnapshot,
+      timeline: [
+        {
+          seq: runningSnapshot.seq,
+          fen: runningSnapshot.fen,
+          moves: runningSnapshot.moves,
+          move_uci: runningSnapshot.moves.at(-1) ?? null,
+          white_time_left_ms: runningSnapshot.white_remaining_ms,
+          black_time_left_ms: runningSnapshot.black_remaining_ms,
+          side_to_move: runningSnapshot.side_to_move,
+          status: runningSnapshot.status,
+          result: runningSnapshot.result,
+          termination: runningSnapshot.termination,
+          server_now_unix_ms: runningSnapshot.server_now_unix_ms,
+          turn_started_server_unix_ms: runningSnapshot.turn_started_server_unix_ms
+        }
+      ],
+      submitMove: vi.fn(),
+      error: "",
+      isConnected: true
+    });
+    mocks.useLivePlaybackMock.mockReturnValue({
+      displayedLiveFrameCount: 1,
+      isLiveFollowing: true,
+      matchId: runningMatch.id,
+      selectedLivePly: runningSnapshot.moves.length,
+      returnToLive: vi.fn(),
+      setSelectedLivePly: vi.fn()
+    });
+
+    render(
+      <MemoryRouter initialEntries={[`/watch/${runningMatch.id}`]}>
+        <Routes>
+          <Route path="/watch/:matchId" element={<WatchPage />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    expect(screen.getByText("White under time pressure")).toBeTruthy();
+    expect(screen.getAllByText("White engine")[0].closest("[data-urgency]")?.getAttribute("data-urgency")).toBe("critical");
+    expect(screen.getAllByText("Black engine")[0].closest("[data-urgency]")?.getAttribute("data-urgency")).toBe("normal");
   });
 });

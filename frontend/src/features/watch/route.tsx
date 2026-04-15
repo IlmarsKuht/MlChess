@@ -14,6 +14,8 @@ import {
 } from "../../shared/chess/board";
 import {
   formatClock,
+  outcomeHeadline,
+  outcomeSubtitle,
   formatLabel,
   formatRelativeTime,
   matchResultText,
@@ -43,6 +45,9 @@ export function WatchPage() {
   const [isSubmittingHumanMove, setIsSubmittingHumanMove] = useState(false);
   const [liveNowMs, setLiveNowMs] = useState(() => Date.now());
   const [error, setError] = useState("");
+  const [boardEventFlash, setBoardEventFlash] = useState(false);
+  const [latestMoveFlash, setLatestMoveFlash] = useState(false);
+  const [resultReveal, setResultReveal] = useState(false);
 
   const selectedLiveMatch = (matches.data ?? []).find((match) => match.id === matchId) ?? null;
   const selectedWatchGame =
@@ -195,6 +200,19 @@ export function WatchPage() {
     return () => window.clearTimeout(timer);
   }, [invalidBoardSquare]);
 
+  useEffect(() => {
+    if ((rawLiveGame?.live_frames.length ?? 0) === 0) {
+      return;
+    }
+    setBoardEventFlash(true);
+    setLatestMoveFlash(true);
+    const timer = window.setTimeout(() => {
+      setBoardEventFlash(false);
+      setLatestMoveFlash(false);
+    }, 900);
+    return () => window.clearTimeout(timer);
+  }, [rawLiveGame?.live_frames.length]);
+
   const watchReplayFrames = buildReplayFrames(selectedWatchReplay);
   const watchReplayFen = watchReplayFrames[Math.min(selectedPly, Math.max(watchReplayFrames.length - 1, 0))] ?? "";
   const watchReplaySquares = watchReplayFen ? fenToBoard(watchReplayFen) : [];
@@ -245,6 +263,53 @@ export function WatchPage() {
   const pendingLiveMatch =
     ((selectedLiveMatch?.watch_state === "live" || pendingSelectedLiveMatch) && !rawLiveGame) ||
     (!selectedLiveMatch && !rawLiveGame && !!matchId);
+
+  const visibleWinnerSide =
+    visibleLiveResult === "white_win"
+      ? "white"
+      : visibleLiveResult === "black_win"
+        ? "black"
+        : null;
+  const replayWinnerSide =
+    selectedWatchReplay?.result === "white_win" ? "white" : selectedWatchReplay?.result === "black_win" ? "black" : null;
+  const whiteUrgency = urgencyForClock(displayedWhiteClockMs, liveSideToMove === "white");
+  const blackUrgency = urgencyForClock(displayedBlackClockMs, liveSideToMove === "black");
+  const visibleLatestPly = displayedLiveMoves.length;
+  const replayLatestPly = selectedWatchReplay?.moves_uci.length ?? 0;
+
+  useEffect(() => {
+    if (!terminalVisibleLive) {
+      return;
+    }
+    setResultReveal(true);
+    const timer = window.setTimeout(() => setResultReveal(false), 1400);
+    return () => window.clearTimeout(timer);
+  }, [terminalVisibleLive, visibleLiveResult, visibleLiveTermination]);
+
+  function liveStatusMessage() {
+    if (terminalVisibleLive) {
+      return "Final move played. Replay details are loading below.";
+    }
+    if (interactiveLive) {
+      if (rawLiveGame?.human_turn) {
+        return isSubmittingHumanMove ? "Submitting your move." : "Your move. Click a piece, then its destination.";
+      }
+      if (liveSideToMove === "white" || liveSideToMove === "black") {
+        return "Engine thinking. Stay ready for the reply.";
+      }
+      return "Engine thinking.";
+    }
+    const activeUrgency = liveSideToMove === "white" ? whiteUrgency : blackUrgency;
+    if (activeUrgency === "critical") {
+      return `${formatLabel(liveSideToMove)} under time pressure.`;
+    }
+    if (liveSideToMove === "white" || liveSideToMove === "black") {
+      return `${formatLabel(liveSideToMove)} thinking.`;
+    }
+    return confirmedLiveMatch.isConnected ? "Live board updating." : "Reconnecting live feed.";
+  }
+
+  const reviewReplayHref = selectedLiveMatch?.game_id ? `/replay?gameId=${encodeURIComponent(selectedLiveMatch.game_id)}` : "";
 
   async function submitHumanMove(uci: string) {
     if (!rawLiveGame) {
@@ -365,8 +430,38 @@ export function WatchPage() {
                 <StatusBadge tone={statusTone(selectedLiveMatch.status)}>{formatLabel(selectedLiveMatch.status)}</StatusBadge>
               </div>
 
+              {selectedWatchReplay.result ? (
+                <section
+                  className={`watch-outcome-hero watch-outcome-${selectedWatchReplay.result} ${resultReveal ? "watch-outcome-reveal" : ""}`}
+                >
+                  <div>
+                    <p className="eyebrow">Final Result</p>
+                    <h2>{outcomeHeadline(selectedWatchReplay.result)}</h2>
+                    <p className="watch-outcome-copy">
+                      {outcomeSubtitle(selectedWatchReplay.result, selectedWatchReplay.termination)}
+                    </p>
+                  </div>
+                  <div className="watch-outcome-actions">
+                    <button type="button" className="button-ghost" onClick={() => navigate("/replay")}>
+                      Review replay
+                    </button>
+                    <button
+                      type="button"
+                      className="button-ghost"
+                      onClick={() => navigate(selectedLiveMatch?.interactive ? "/play-engine" : "/live-duel")}
+                    >
+                      {selectedLiveMatch?.interactive ? "Play again" : "Back to arena"}
+                    </button>
+                  </div>
+                </section>
+              ) : null}
+
               {selectedWatchReplay.variant === "standard" && watchReplaySquares.length > 0 ? (
-                <div className="watch-board-wrap">
+                <div
+                  className={`watch-board-wrap ${
+                    replayWinnerSide ? `watch-board-wrap-winner-${replayWinnerSide}` : selectedWatchReplay.result === "draw" ? "watch-board-wrap-draw" : ""
+                  }`}
+                >
                   <BoardView squares={watchReplaySquares} />
                 </div>
               ) : (
@@ -399,12 +494,14 @@ export function WatchPage() {
                   title={selectedLiveMatch.white_participant.kind === "human_player" ? "You" : "White engine"}
                   name={participantName(selectedLiveMatch.white_participant, "White")}
                   clock={formatClock(selectedWatchGame?.white_time_left_ms ?? 0)}
+                  winner={replayWinnerSide === "white"}
                 />
                 <EngineSideCard
                   side="black"
                   title={selectedLiveMatch.black_participant.kind === "human_player" ? "You" : "Black engine"}
                   name={participantName(selectedLiveMatch.black_participant, "Black")}
                   clock={formatClock(selectedWatchGame?.black_time_left_ms ?? 0)}
+                  winner={replayWinnerSide === "black"}
                 />
               </div>
 
@@ -430,7 +527,7 @@ export function WatchPage() {
                   <h2>Moves</h2>
                   <span>{selectedWatchReplay.moves_uci.length} total</span>
                 </div>
-                <MoveList moves={selectedWatchReplay.moves_uci} activePly={selectedPly} />
+                <MoveList moves={selectedWatchReplay.moves_uci} activePly={selectedPly} latestPly={replayLatestPly} />
               </div>
             </div>
           </div>
@@ -470,8 +567,46 @@ export function WatchPage() {
                 <StatusBadge tone={statusTone(visibleLiveStatus)}>{formatLabel(visibleLiveStatus || "running")}</StatusBadge>
               </div>
 
+              {terminalVisibleLive ? (
+                <section
+                  className={`watch-outcome-hero watch-outcome-${visibleLiveResult ?? "none"} ${resultReveal ? "watch-outcome-reveal" : ""}`}
+                >
+                  <div>
+                    <p className="eyebrow">Match Finished</p>
+                    <h2>{outcomeHeadline(visibleLiveResult)}</h2>
+                    <p className="watch-outcome-copy">{outcomeSubtitle(visibleLiveResult, visibleLiveTermination)}</p>
+                    <p className="watch-outcome-footnote">Replay details are loading while the final position stays on screen.</p>
+                  </div>
+                  <div className="watch-outcome-actions">
+                    <button
+                      type="button"
+                      className="button-ghost"
+                      disabled={!reviewReplayHref}
+                      onClick={() => (reviewReplayHref ? navigate(reviewReplayHref) : undefined)}
+                    >
+                      {reviewReplayHref ? "Review replay" : "Replay loading"}
+                    </button>
+                    <button
+                      type="button"
+                      className="button-ghost"
+                      onClick={() => navigate(selectedLiveMatch?.interactive ? "/play-engine" : "/live-duel")}
+                    >
+                      {selectedLiveMatch?.interactive ? "Play again" : "Back to arena"}
+                    </button>
+                  </div>
+                </section>
+              ) : null}
+
               {rawLiveGame.variant === "standard" && liveBoardSquares.length > 0 ? (
-                <div className="watch-board-wrap">
+                <div
+                  className={`watch-board-wrap ${boardEventFlash ? "watch-board-wrap-flash" : ""} ${
+                    visibleWinnerSide
+                      ? `watch-board-wrap-winner-${visibleWinnerSide}`
+                      : visibleLiveResult === "draw"
+                        ? "watch-board-wrap-draw"
+                        : ""
+                  }`}
+                >
                   <BoardView
                     squares={orientedLiveBoardSquares}
                     selectedSquare={selectedBoardSquare}
@@ -504,21 +639,17 @@ export function WatchPage() {
                 </div>
                 <div className="watch-live-controls">
                   <StatusBadge tone={terminalVisibleLive ? "quiet" : liveSideToMove === "white" ? "quiet" : "warning"}>
-                    {terminalVisibleLive ? "Game finished" : liveSideToMove === "white" ? "White to move" : "Black to move"}
-                  </StatusBadge>
-                  <span className="subtle">
                     {terminalVisibleLive
-                      ? "Game finished. Replay details are loading."
-                      : interactiveLive
-                      ? rawLiveGame.human_turn
-                        ? isSubmittingHumanMove
-                          ? "Submitting move..."
-                          : "Your turn: click a piece, then click its destination."
-                        : "Engine is thinking."
-                      : confirmedLiveMatch.isConnected
-                        ? "Viewer is delayed slightly for readability."
-                        : "Reconnecting live feed..."}
-                  </span>
+                      ? outcomeHeadline(visibleLiveResult)
+                      : liveSideToMove === "white"
+                        ? whiteUrgency === "critical"
+                          ? "White under time pressure"
+                          : "White to move"
+                        : blackUrgency === "critical"
+                          ? "Black under time pressure"
+                          : "Black to move"}
+                  </StatusBadge>
+                  <span className="subtle">{liveStatusMessage()}</span>
                   {!isLiveFollowing ? (
                     <button type="button" className="button-ghost" onClick={livePlayback.returnToLive}>
                       Return to live
@@ -536,6 +667,8 @@ export function WatchPage() {
                   name={participantName(liveWhiteParticipant, "White")}
                   clock={formatClock(displayedWhiteClockMs)}
                   active={liveSideToMove === "white"}
+                  urgency={whiteUrgency}
+                  winner={visibleWinnerSide === "white"}
                 />
                 <EngineSideCard
                   side="black"
@@ -543,6 +676,8 @@ export function WatchPage() {
                   name={participantName(liveBlackParticipant, "Black")}
                   clock={formatClock(displayedBlackClockMs)}
                   active={liveSideToMove === "black"}
+                  urgency={blackUrgency}
+                  winner={visibleWinnerSide === "black"}
                 />
               </div>
 
@@ -565,7 +700,12 @@ export function WatchPage() {
                   <h2>Moves</h2>
                   <span>{displayedLiveMoves.length} revealed</span>
                 </div>
-                <MoveList moves={displayedLiveMoves} activePly={visibleLivePly} />
+                <MoveList
+                  moves={displayedLiveMoves}
+                  activePly={visibleLivePly}
+                  latestPly={visibleLatestPly}
+                  animateLatest={latestMoveFlash}
+                />
               </div>
             </div>
           </div>
@@ -577,4 +717,17 @@ export function WatchPage() {
       )}
     </div>
   );
+}
+
+function urgencyForClock(ms: number, active: boolean) {
+  if (!active) {
+    return "normal" as const;
+  }
+  if (ms <= 5000) {
+    return "critical" as const;
+  }
+  if (ms <= 15000) {
+    return "warning" as const;
+  }
+  return "normal" as const;
 }

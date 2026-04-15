@@ -1,4 +1,4 @@
-import type { GameResult, TimeControl, TournamentKind, Variant } from "../../app/types";
+import type { GameResult, GameTermination, TimeControl, TournamentKind, Variant } from "../../app/types";
 
 export function formatVariant(value: Variant) {
   return value === "standard" ? "Standard" : "Chess960";
@@ -72,6 +72,37 @@ export function winnerText(result?: GameResult | null) {
       return "Draw";
     default:
       return "Running";
+  }
+}
+
+export function outcomeHeadline(result?: GameResult | null) {
+  switch (result) {
+    case "white_win":
+      return "White wins";
+    case "black_win":
+      return "Black wins";
+    case "draw":
+      return "Draw";
+    default:
+      return "Game in progress";
+  }
+}
+
+export function outcomeSubtitle(result?: GameResult | null, termination?: GameTermination | null) {
+  if (!result) {
+    return "The board is still live.";
+  }
+  const terminationLabel =
+    termination && termination !== "none" ? ` by ${formatLabel(termination)}` : "";
+  switch (result) {
+    case "white_win":
+      return `White takes the point${terminationLabel}.`;
+    case "black_win":
+      return `Black takes the point${terminationLabel}.`;
+    case "draw":
+      return `The game is shared${terminationLabel}.`;
+    default:
+      return "The board is still live.";
   }
 }
 
