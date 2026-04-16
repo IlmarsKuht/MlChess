@@ -11,7 +11,7 @@ use tokio::{
 };
 use tracing::warn;
 
-use crate::match_runner::AgentAdapter;
+use crate::adapter::AgentAdapter;
 
 pub(crate) struct UciAgentAdapter {
     version: AgentVersion,

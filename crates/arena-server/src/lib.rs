@@ -1,8 +1,9 @@
 mod api;
 mod db;
 mod gameplay;
+mod human_games;
 mod live;
-mod orchestration;
+mod match_runtime;
 mod presentation;
 mod rating;
 mod registry;
@@ -11,6 +12,7 @@ mod registry_simple_toml;
 mod registry_sync;
 mod state;
 mod storage;
+mod tournaments;
 
 use std::path::PathBuf;
 
@@ -27,8 +29,8 @@ use axum::{
 };
 use chrono::Utc;
 use db::init_db;
+use human_games::service::restore_human_game;
 use live::LiveMatchStore;
-use orchestration::{restore_engine_game, restore_human_game};
 use presentation::{resolve_match_lifecycle, resolve_tournament_status};
 use registry::{SetupRegistryCache, sync_setup_registry_if_changed};
 use serde_json::{Value, json};
@@ -37,6 +39,7 @@ use state::{
     AppState, HumanGameStore, LiveMetricsStore, RequestContext, RequestJournalEntry,
     TournamentCoordinator,
 };
+use tournaments::service::restore_engine_game;
 use tower::ServiceBuilder;
 use tower_http::{cors::CorsLayer, services::ServeDir};
 use tracing::{error, info, warn};
@@ -633,7 +636,7 @@ mod tests {
         let pool_id = list_pools(&db).await.unwrap().remove(0).id;
         let version_id = list_agent_versions(&db, None).await.unwrap().remove(0).id;
 
-        let result = crate::orchestration::create_tournament_run(
+        let result = crate::tournaments::service::create_tournament_run(
             &db,
             "Too Small".to_string(),
             TournamentKind::RoundRobin,

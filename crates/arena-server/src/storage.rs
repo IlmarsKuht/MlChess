@@ -13,9 +13,10 @@ use uuid::Uuid;
 use crate::{
     ApiError,
     db::{as_bool, decode_json, encode_json, parse_ts, ts},
+    match_runtime::types::HumanPlayer,
     presentation::HumanPlayerProfile,
     rating::default_entry,
-    state::{HumanPlayer, RequestJournalEntry},
+    state::RequestJournalEntry,
 };
 
 pub(crate) async fn insert_agent(db: &SqlitePool, agent: &Agent) -> Result<()> {

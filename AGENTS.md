@@ -2,8 +2,8 @@
 
 ## Architecture Map
 - `crates/arena-core`: shared domain types, live protocol types, rating logic, pairing, and testing helpers.
-- `crates/arena-runner`: engine adapter/runtime logic for UCI engines and match execution helpers.
-- `crates/arena-server`: Axum API, websocket/live orchestration, SQLite persistence, runtime restore, and setup sync.
+- `crates/arena-runner`: engine adapter/process logic for UCI engines and pure chess/runtime helpers.
+- `crates/arena-server`: Axum API, authoritative match runtime, websocket/live orchestration, SQLite persistence, runtime restore, and setup sync.
 - `frontend`: Vite + React UI, including live watch/play flows, API calls, and websocket state.
 - `setup`: backend-managed opening suites, pools, and event presets synced into SQLite.
 - `engines`: runnable engine versions and manifests.
@@ -12,7 +12,9 @@
 ## Where To Look First
 - Backend API and HTTP/debug endpoints: `crates/arena-server/src/api.rs`
 - Live websocket/replay flow: `crates/arena-server/src/live.rs`
-- Runtime orchestration, timeouts, move handling, restore/finalization: `crates/arena-server/src/orchestration.rs`
+- Runtime loop, timeouts, move handling, publication, and finalization: `crates/arena-server/src/match_runtime/`
+- Tournament application flow and engine restore: `crates/arena-server/src/tournaments/service.rs`
+- Human game creation, move submission, and restore: `crates/arena-server/src/human_games/service.rs`
 - App state and in-memory runtime stores: `crates/arena-server/src/state.rs`
 - Persistence helpers and debug bundle assembly: `crates/arena-server/src/storage.rs`
 - SQLite schema/migrations-by-code: `crates/arena-server/src/db.rs`

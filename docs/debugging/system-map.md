@@ -16,11 +16,14 @@
   - `crates/arena-server/src/api.rs`
   - `frontend/src/app/live.ts`
 - Timeout, clock drift, or illegal human move handling:
-  - `crates/arena-server/src/orchestration.rs`
+  - `crates/arena-server/src/match_runtime/human_turn.rs`
+  - `crates/arena-server/src/match_runtime/engine_turn.rs`
+  - `crates/arena-server/src/match_runtime/publish.rs`
   - `frontend/src/App.tsx`
 - Restore after restart mismatch:
   - `crates/arena-server/src/lib.rs`
-  - `crates/arena-server/src/orchestration.rs`
+  - `crates/arena-server/src/tournaments/service.rs`
+  - `crates/arena-server/src/human_games/service.rs`
   - `crates/arena-server/src/storage.rs`
 - Selected match, fullscreen watch, or delayed reveal bug:
   - `frontend/src/App.tsx`

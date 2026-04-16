@@ -8,7 +8,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::state::HumanPlayer;
+use crate::match_runtime::types::HumanPlayer;
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]

@@ -16,10 +16,7 @@ use crate::live::ReplayResult;
 use crate::{
     ApiError,
     gameplay::build_replay_frames,
-    orchestration::{
-        create_human_game, create_tournament_run, load_human_player_profile,
-        resolve_preset_participants, submit_human_move,
-    },
+    human_games::service::{create_human_game, load_human_player_profile, submit_human_move},
     presentation::{
         ApiGameRecord, ApiLeaderboardEntry, ApiMatchSeries, HumanPlayerProfile, ReplayPayload,
         api_game_record, api_leaderboard_entry, api_match_series, participant_for_id,
@@ -38,6 +35,7 @@ use crate::{
         load_live_runtime_checkpoint, load_live_runtime_events_since, load_pool_leaderboard,
         load_rating_history, update_tournament_status,
     },
+    tournaments::service::{create_tournament_run, resolve_preset_participants},
 };
 use arena_core::{LiveEventEnvelope, LiveMatchSnapshot};
 

@@ -1,12 +1,14 @@
 # Arena Server Codex Guide
 
 ## Ownership
-- This crate owns the API, orchestration, live runtime, persistence, restore flow, and debug bundle APIs.
+- This crate owns the API, authoritative match runtime, live runtime, persistence, restore flow, and debug bundle APIs.
 
 ## Likely Files To Inspect
 - `src/api.rs`
 - `src/live.rs`
-- `src/orchestration.rs`
+- `src/match_runtime/`
+- `src/tournaments/service.rs`
+- `src/human_games/service.rs`
 - `src/state.rs`
 - `src/storage.rs`
 - `src/db.rs`
@@ -18,11 +20,11 @@
 - Snapshot vs replay issues:
   - Check `initial_stream_events`, `LiveMatchStore::replay_since`, and persisted `live_runtime_events`.
 - Timeout and clock drift:
-  - Inspect `process_human_move`, `process_engine_turn`, `emit_human_clock_sync`, and related checkpoint publishing in `src/orchestration.rs`.
+  - Inspect `src/match_runtime/human_turn.rs`, `src/match_runtime/engine_turn.rs`, and `src/match_runtime/publish.rs`.
 - Human move rejection or duplicate issues:
-  - Inspect websocket message handling in `src/api.rs`, intent dedupe in `src/orchestration.rs`, and any request/debug correlation fields.
+  - Inspect websocket message handling in `src/api.rs`, intent dedupe in `src/match_runtime/human_turn.rs`, and any request/debug correlation fields.
 - Restore/runtime restart issues:
-  - Inspect `restore_live_runtime` in `src/lib.rs`, runtime restore helpers in `src/orchestration.rs`, and checkpoint/event persistence in `src/storage.rs`.
+  - Inspect `restore_live_runtime` in `src/lib.rs`, restore helpers in `src/tournaments/service.rs` and `src/human_games/service.rs`, and checkpoint/event persistence in `src/storage.rs`.
 
 ## Testing
 - Add or extend regression tests in the nearest existing test module when possible.

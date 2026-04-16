@@ -5,8 +5,8 @@ Local chess benchmarking platform for UCI engines, written in Rust with a React 
 ## Workspace
 
 - `crates/arena-core`: shared domain model, pairing, opening parsing, and Elo logic
-- `crates/arena-runner`: UCI process orchestration and match execution
-- `crates/arena-server`: Axum API, SQLite persistence, tournament coordinator, and static asset hosting
+- `crates/arena-runner`: UCI adapter/process orchestration and chess-runtime helpers
+- `crates/arena-server`: authoritative match runtime, SQLite persistence, live runtime, tournament coordinator, and static asset hosting
 - `crates/engine-sdk`: helpers for building Rust UCI engines
 - `engines`: runnable engines discovered from workspace crates or command manifests
 - `setup`: code-managed opening suites and benchmark pool manifests
@@ -74,6 +74,12 @@ files change, pruning removed registry entries automatically.
 
 - `cargo check --workspace`
 - `cargo test --workspace`
+
+## Runtime Ownership
+
+`arena-server` is the single authoritative owner of match execution. `arena-runner`
+does not expose a high-level match loop; it only provides engine adapters and pure
+helpers used by the server runtime.
 
 ## Starter Openings
 
