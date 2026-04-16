@@ -16,7 +16,6 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use arena_core::{LiveResult, LiveStatus, LiveTermination, ProtocolLiveSide};
-use chrono::Utc;
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
@@ -26,6 +25,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
+use chrono::Utc;
 use db::init_db;
 use live::LiveMatchStore;
 use orchestration::{restore_engine_game, restore_human_game};
@@ -112,7 +112,10 @@ pub async fn run_server(
     restore_live_runtime(&state).await?;
     let reconciled = reconcile_history_statuses(&state.db).await?;
     if reconciled > 0 {
-        info!(updated_rows = reconciled, "reconciled stale tournament history rows");
+        info!(
+            updated_rows = reconciled,
+            "reconciled stale tournament history rows"
+        );
     }
     let app = build_app(state);
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
@@ -604,7 +607,12 @@ mod tests {
         assert!(
             pools
                 .iter()
-                .any(|pool| pool.name == "Starter Standard Pool")
+                .any(|pool| pool.registry_key.as_deref() == Some("starter-standard-pool"))
+        );
+        assert!(
+            pools
+                .iter()
+                .any(|pool| pool.registry_key.as_deref() == Some("starter-chess960-pool"))
         );
         assert!(leaderboard.len() >= 1);
     }
@@ -855,11 +863,12 @@ mod tests {
             status: LiveStatus::Running,
             result: arena_core::LiveResult::None,
             termination: arena_core::LiveTermination::None,
-            fen: "4k3/8/8/8/8/8/8/4K3 w - - 0 1".to_string(),
+            start_fen: cozy_chess::Board::default().to_string(),
+            fen: "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1".to_string(),
             moves: vec!["e2e4".to_string()],
             white_remaining_ms: 60_000,
             black_remaining_ms: 60_000,
-            side_to_move: arena_core::ProtocolLiveSide::White,
+            side_to_move: arena_core::ProtocolLiveSide::Black,
             turn_started_server_unix_ms: Utc::now().timestamp_millis(),
             updated_at: Utc::now(),
         };
@@ -1014,6 +1023,8 @@ mod tests {
                 status: LiveStatus::Finished,
                 result: arena_core::LiveResult::WhiteWin,
                 termination: arena_core::LiveTermination::EngineFailure,
+                start_fen: "4r1k1/pp2rp1p/2pbn2q/Q2p4/3P4/1R1BP2P/PPP2PP1/1R5K w - - 0 29"
+                    .to_string(),
                 fen: "4r1k1/pp2rp1p/2pbn2q/Q2p4/3P4/1R1BP2P/PPP2PP1/1R5K w - - 0 29".to_string(),
                 moves: vec!["e1a5".to_string()],
                 white_remaining_ms: 22_000,

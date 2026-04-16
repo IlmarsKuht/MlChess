@@ -4,7 +4,6 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Instant,
 };
 
 use anyhow::{Result, anyhow, bail};
@@ -12,7 +11,7 @@ use arena_core::{
     AgentVersion, EventPreset, EventPresetSelectionMode, GameLogEntry, GameRecord, GameResult,
     LeaderboardEntry, LiveRuntimeCheckpoint, MatchSeries, MatchStatus, RoundRobinScheduler,
     ScheduledPair, StabilityConfig, StabilityTracker, Tournament, TournamentKind, TournamentStatus,
-    Variant, snapshot_from_entry,
+    snapshot_from_entry,
 };
 use arena_runner::{
     AgentAdapter, build_adapter, calculate_move_budget, classify_position, classify_terminal_board,
@@ -26,7 +25,10 @@ use uuid::Uuid;
 
 use crate::{
     ApiError,
-    gameplay::starting_board_for_human_game,
+    gameplay::{
+        MatchConfig, ensure_engine_supports_variant, fen_for_variant, parse_saved_board,
+        resolve_start_state,
+    },
     live::{
         clock_sync_from_checkpoint, game_finished_from_checkpoint, live_result_from_game_result,
         live_status_from_match_status, live_termination_from_game_termination,
@@ -36,33 +38,27 @@ use crate::{
     presentation::HumanPlayerProfile,
     rating::build_pair_rating_update,
     state::{
-        AppState, HumanGameCommand, HumanGameRuntime, HumanGameSession, HumanMoveAck, HumanPlayer,
-        MoveDebugContext,
+        AppState, CompletedGameTable, EngineSeatController, HumanGameCommand, HumanGameHandle,
+        HumanMoveAck, HumanPlayer, HumanSeatController, MatchRuntime, MatchSeatController,
+        MatchSession, MoveDebugContext,
     },
     storage::{
-        ensure_agent_version_exists, ensure_human_player, ensure_leaderboard_seed,
-        ensure_pool_exists, get_agent_version, get_match_series, get_pool, get_tournament,
-        insert_game_tx, insert_human_game_tx, insert_human_rating_snapshot,
-        insert_live_runtime_event_tx, insert_match_series, insert_match_series_tx,
-        insert_rating_snapshot, insert_tournament, insert_tournament_tx, list_agent_versions,
-        list_agent_versions_by_ids, load_human_profile, load_pool_leaderboard, load_pool_openings,
-        update_match_series_status,
-        update_match_series_status_tx, update_tournament_status, update_tournament_status_tx,
-        upsert_live_runtime_checkpoint_tx,
+        ensure_human_player, ensure_leaderboard_seed, get_agent_version, get_match_series,
+        get_pool, get_tournament, insert_game_tx, insert_human_game_tx,
+        insert_human_rating_snapshot, insert_live_runtime_event_tx, insert_match_series,
+        insert_match_series_tx, insert_rating_snapshot, insert_tournament, insert_tournament_tx,
+        list_agent_versions, list_agent_versions_by_ids, load_human_profile, load_pool_leaderboard,
+        load_pool_openings, update_match_series_status, update_match_series_status_tx,
+        update_tournament_status, update_tournament_status_tx, upsert_live_runtime_checkpoint_tx,
     },
 };
-
-enum CompletedGameTable {
-    Engine,
-    Human,
-}
 
 fn push_runtime_log(logs: &mut Vec<GameLogEntry>, entry: GameLogEntry) {
     logs.push(entry);
 }
 
 fn runtime_log(
-    runtime: &HumanGameRuntime,
+    runtime: &MatchRuntime,
     source: &str,
     event: &str,
     message: impl Into<String>,
@@ -73,27 +69,23 @@ fn runtime_log(
         .with_clocks(runtime.white_time_left_ms, runtime.black_time_left_ms)
 }
 
-fn human_runtime_log(
-    session: &HumanGameSession,
-    runtime: &HumanGameRuntime,
+fn match_runtime_log(
+    session: &MatchSession,
+    runtime: &MatchRuntime,
+    source: &str,
     event: &str,
     message: impl Into<String>,
 ) -> GameLogEntry {
-    runtime_log(runtime, "server.human_runtime", event, message)
-        .with_match_id(session.match_series.id)
+    runtime_log(runtime, source, event, message).with_match_id(session.match_series.id)
 }
 
-fn engine_runtime_log(
-    session: &EngineMatchSession,
-    runtime: &EngineMatchRuntime,
+fn human_runtime_log(
+    session: &MatchSession,
+    runtime: &MatchRuntime,
     event: &str,
     message: impl Into<String>,
 ) -> GameLogEntry {
-    GameLogEntry::new(event, "info", "server.engine_runtime", message.into())
-        .with_match_id(session.match_series.id)
-        .with_tournament_id(runtime.tournament_id)
-        .with_seq(runtime.seq)
-        .with_clocks(runtime.white_time_left_ms, runtime.black_time_left_ms)
+    match_runtime_log(session, runtime, "server.human_runtime", event, message)
 }
 
 pub(crate) async fn create_human_game(
@@ -104,18 +96,16 @@ pub(crate) async fn create_human_game(
     human_plays_white: bool,
 ) -> Result<(Uuid, Uuid), ApiError> {
     let pool = get_pool(&state.db, pool_id).await?;
-    if pool.variant != Variant::Standard {
-        return Err(ApiError::BadRequest(
-            "human play currently supports standard pools only".to_string(),
-        ));
-    }
-
     let engine_version = get_agent_version(&state.db, engine_version_id).await?;
+    ensure_engine_supports_variant(&engine_version, pool.variant)?;
     let human_player = ensure_human_player(&state.db).await?;
     let openings = load_pool_openings(&state.db, &pool).await?;
     let opening = openings.first().cloned();
-    let board = starting_board_for_human_game(pool.variant, opening.as_ref(), None)?;
-    let start_fen = format!("{board}");
+    let (board, start_fen) = resolve_start_state(MatchConfig {
+        variant: pool.variant,
+        opening: opening.as_ref(),
+        opening_seed: None,
+    })?;
     let match_id = Uuid::new_v4();
     let tournament_id = Uuid::new_v4();
     let created_at = Utc::now();
@@ -161,7 +151,36 @@ pub(crate) async fn create_human_game(
     engine.prepare(pool.variant, &mut logs).await?;
     engine.begin_game(&mut logs).await?;
     let initial_hash = board.hash_without_ep();
-    let mut runtime = HumanGameRuntime {
+    let (command_tx, command_rx) = tokio::sync::mpsc::channel(32);
+    let human_side = if human_plays_white {
+        cozy_chess::Color::White
+    } else {
+        cozy_chess::Color::Black
+    };
+    let (white_seat, black_seat) = if human_side == cozy_chess::Color::White {
+        (
+            MatchSeatController::Human(HumanSeatController {
+                player: human_player.clone(),
+                command_rx,
+                seen_intents: HashMap::new(),
+            }),
+            MatchSeatController::Engine(EngineSeatController {
+                adapter: Some(engine),
+            }),
+        )
+    } else {
+        (
+            MatchSeatController::Engine(EngineSeatController {
+                adapter: Some(engine),
+            }),
+            MatchSeatController::Human(HumanSeatController {
+                player: human_player.clone(),
+                command_rx,
+                seen_intents: HashMap::new(),
+            }),
+        )
+    };
+    let mut runtime = MatchRuntime {
         tournament_id,
         variant: pool.variant,
         time_control: pool.time_control.clone(),
@@ -173,27 +192,20 @@ pub(crate) async fn create_human_game(
         white_time_left_ms: pool.time_control.initial_ms,
         black_time_left_ms: pool.time_control.initial_ms,
         max_plies: 300,
-        engine_side: if human_plays_white {
-            cozy_chess::Color::Black
-        } else {
-            cozy_chess::Color::White
-        },
-        engine,
+        white_seat,
+        black_seat,
         logs,
         started_at: created_at,
         turn_started_server_unix_ms: created_at.timestamp_millis(),
         seq: 0,
-        seen_intents: HashMap::new(),
         result: None,
         termination: None,
         status: MatchStatus::Running,
     };
-    let (command_tx, command_rx) = tokio::sync::mpsc::channel(32);
-    let session = HumanGameSession {
+    let session = MatchSession {
         name,
         match_series: match_series.clone(),
-        human_player,
-        command_tx,
+        completed_game_table: CompletedGameTable::Human,
     };
     let created_log = human_runtime_log(
         &session,
@@ -202,19 +214,16 @@ pub(crate) async fn create_human_game(
         "human game created",
     )
     .with_fields(json!({
-        "human_player_id": session.human_player.id,
+        "human_player_id": human_player.id,
         "white_version_id": session.match_series.white_version_id,
         "black_version_id": session.match_series.black_version_id,
     }));
     push_runtime_log(&mut runtime.logs, created_log);
-    state.human_games.insert(session.clone()).await;
-    tokio::spawn(run_human_game_owner(
-        state.clone(),
-        session,
-        runtime,
-        command_rx,
-        true,
-    ));
+    state
+        .human_games
+        .insert(match_series.id, HumanGameHandle { command_tx })
+        .await;
+    tokio::spawn(run_match_owner(state.clone(), session, runtime, true));
 
     Ok((match_id, tournament_id))
 }
@@ -279,13 +288,14 @@ pub(crate) async fn restore_human_game(
         match_series.white_version_id
     };
     let engine_version = get_agent_version(&state.db, engine_version_id).await?;
-    let openings = load_pool_openings(&state.db, &pool).await?;
-    let opening = openings
-        .iter()
-        .find(|candidate| Some(candidate.id) == match_series.opening_id)
-        .cloned();
-    let mut board = starting_board_for_human_game(pool.variant, opening.as_ref(), None)?;
-    let start_fen = format!("{board}");
+    ensure_engine_supports_variant(&engine_version, pool.variant)?;
+    let human_side = if match_series.white_version_id == human_player.id {
+        cozy_chess::Color::White
+    } else {
+        cozy_chess::Color::Black
+    };
+    let (mut board, start_fen) = parse_saved_board(pool.variant, &checkpoint.start_fen)
+        .map_err(|err| ApiError::Conflict(format!("failed to restore start FEN: {err}")))?;
     let mut repetitions = HashMap::from([(board.hash_without_ep(), 1_u8)]);
     for uci in &checkpoint.moves {
         let mv = cozy_chess::util::parse_uci_move(&board, uci)
@@ -300,8 +310,31 @@ pub(crate) async fn restore_human_game(
     let mut engine = build_adapter(engine_version);
     engine.prepare(pool.variant, &mut logs).await?;
     engine.begin_game(&mut logs).await?;
-
-    let runtime = HumanGameRuntime {
+    let (command_tx, command_rx) = tokio::sync::mpsc::channel(32);
+    let (white_seat, black_seat) = if human_side == cozy_chess::Color::White {
+        (
+            MatchSeatController::Human(HumanSeatController {
+                player: human_player.clone(),
+                command_rx,
+                seen_intents: HashMap::new(),
+            }),
+            MatchSeatController::Engine(EngineSeatController {
+                adapter: Some(engine),
+            }),
+        )
+    } else {
+        (
+            MatchSeatController::Engine(EngineSeatController {
+                adapter: Some(engine),
+            }),
+            MatchSeatController::Human(HumanSeatController {
+                player: human_player.clone(),
+                command_rx,
+                seen_intents: HashMap::new(),
+            }),
+        )
+    };
+    let runtime = MatchRuntime {
         tournament_id: match_series.tournament_id,
         variant: pool.variant,
         time_control: pool.time_control.clone(),
@@ -313,17 +346,12 @@ pub(crate) async fn restore_human_game(
         white_time_left_ms: checkpoint.white_remaining_ms,
         black_time_left_ms: checkpoint.black_remaining_ms,
         max_plies: 300,
-        engine_side: if match_series.white_version_id == human_player.id {
-            cozy_chess::Color::Black
-        } else {
-            cozy_chess::Color::White
-        },
-        engine,
+        white_seat,
+        black_seat,
         logs,
         started_at: tournament.started_at.unwrap_or(match_series.created_at),
         turn_started_server_unix_ms: checkpoint.turn_started_server_unix_ms,
         seq: checkpoint.seq,
-        seen_intents: HashMap::new(),
         result: match checkpoint.result {
             arena_core::LiveResult::WhiteWin => Some(GameResult::WhiteWin),
             arena_core::LiveResult::BlackWin => Some(GameResult::BlackWin),
@@ -362,106 +390,57 @@ pub(crate) async fn restore_human_game(
             arena_core::LiveStatus::Aborted => MatchStatus::Failed,
         },
     };
-    let (command_tx, command_rx) = tokio::sync::mpsc::channel(32);
-    let session = HumanGameSession {
+    let session = MatchSession {
         name: tournament.name,
-        match_series,
-        human_player,
-        command_tx,
+        match_series: match_series.clone(),
+        completed_game_table: CompletedGameTable::Human,
     };
-    state.human_games.insert(session.clone()).await;
-    tokio::spawn(run_human_game_owner(
-        state.clone(),
-        session,
-        runtime,
-        command_rx,
-        false,
-    ));
+    state
+        .human_games
+        .insert(match_series.id, HumanGameHandle { command_tx })
+        .await;
+    tokio::spawn(run_match_owner(state.clone(), session, runtime, false));
     Ok(())
 }
 
-async fn run_human_game_owner(
+async fn run_match_owner(
     state: AppState,
-    session: HumanGameSession,
-    mut runtime: HumanGameRuntime,
-    mut command_rx: tokio::sync::mpsc::Receiver<HumanGameCommand>,
+    session: MatchSession,
+    runtime: MatchRuntime,
     publish_initial_snapshot: bool,
 ) {
+    let _ = run_match_to_completion(&state, session, runtime, publish_initial_snapshot).await;
+}
+
+async fn run_match_to_completion(
+    state: &AppState,
+    session: MatchSession,
+    mut runtime: MatchRuntime,
+    publish_initial_snapshot: bool,
+) -> Result<GameRecord, ApiError> {
     if publish_initial_snapshot {
-        let _ = publish_human_runtime(&state, &session, &mut runtime, true).await;
+        publish_match_runtime(state, &session, &mut runtime, true).await?;
     }
+
     loop {
         if runtime.status != MatchStatus::Running {
-            let _ = finalize_human_game(state.clone(), session.clone(), runtime).await;
-            return;
+            return finalize_match_game(state, session, runtime).await;
         }
-        if runtime.board.side_to_move() == runtime.engine_side {
-            let _ = process_engine_turn(&state, &session, &mut runtime).await;
-            continue;
-        }
-        let timeout_delay = remaining_turn_time_ms(&runtime);
-        if timeout_delay == 0 {
-            let _ = finalize_human_timeout(&state, &session, &mut runtime).await;
-            continue;
-        }
-        let sleep = tokio::time::sleep(std::time::Duration::from_millis(timeout_delay));
-        tokio::pin!(sleep);
-        let sync = tokio::time::sleep(std::time::Duration::from_millis(
-            CLOCK_SYNC_INTERVAL_MS.min(timeout_delay),
-        ));
-        tokio::pin!(sync);
-        let mut timed_out = false;
-        let command_opt = loop {
-            let maybe_command = tokio::select! {
-                maybe_command = command_rx.recv() => maybe_command,
-                _ = &mut sleep => {
-                    state
-                        .live_metrics
-                        .timeout_fires
-                        .fetch_add(1, Ordering::Relaxed);
-                    let _ = finalize_human_timeout(&state, &session, &mut runtime).await;
-                    timed_out = true;
-                    break None;
-                }
-                _ = &mut sync => {
-                    let _ = emit_human_clock_sync(&state, &session, &mut runtime).await;
-                    let next_delay = CLOCK_SYNC_INTERVAL_MS.min(remaining_turn_time_ms(&runtime).max(1));
-                    sync.as_mut().reset(tokio::time::Instant::now() + std::time::Duration::from_millis(next_delay));
-                    continue;
-                }
-            };
-            break maybe_command;
-        };
-        if timed_out {
-            continue;
-        }
-        let Some(command) = command_opt else {
-            return;
-        };
-        match command {
-            HumanGameCommand::SubmitMove {
-                intent_id,
-                client_action_id,
-                ws_connection_id,
-                move_uci,
-                respond_to,
-            } => {
-                let ack = process_human_move(
-                    &state,
-                    &session,
-                    &mut runtime,
-                    MoveDebugContext {
-                        request_id: None,
-                        client_action_id,
-                        ws_connection_id,
-                        intent_id,
-                        move_uci,
-                    },
-                )
-                .await;
-                let _ = respond_to.send(ack);
-            }
-        }
+        process_active_turn(state, &session, &mut runtime).await?;
+    }
+}
+
+async fn process_active_turn(
+    state: &AppState,
+    session: &MatchSession,
+    runtime: &mut MatchRuntime,
+) -> Result<(), ApiError> {
+    let side = runtime.active_side();
+    let is_engine_turn = matches!(runtime.active_seat(), MatchSeatController::Engine(_));
+    if is_engine_turn {
+        process_engine_turn(state, session, runtime, side).await
+    } else {
+        process_human_turn(state, session, runtime, side).await
     }
 }
 
@@ -608,12 +587,14 @@ pub(crate) async fn resolve_preset_participants(
     db: &SqlitePool,
     preset: &EventPreset,
 ) -> Result<Vec<Uuid>, ApiError> {
+    let pool = get_pool(db, preset.pool_id).await?;
     let versions = list_agent_versions(db, None).await?;
     let participants = match preset.selection_mode {
         EventPresetSelectionMode::AllActiveEngines => versions
             .into_iter()
             .filter(|version| version.active)
             .filter(|version| !version.tags.iter().any(|tag| tag == "hidden"))
+            .filter(|version| version.capabilities.supports_variant(pool.variant))
             .map(|version| version.id)
             .collect(),
     };
@@ -635,9 +616,15 @@ pub(crate) async fn create_tournament_run(
         ));
     }
 
-    ensure_pool_exists(db, pool_id).await?;
-    for participant in &participant_version_ids {
-        ensure_agent_version_exists(db, *participant).await?;
+    let pool = get_pool(db, pool_id).await?;
+    let versions = list_agent_versions_by_ids(db, &participant_version_ids).await?;
+    if versions.len() != participant_version_ids.len() {
+        return Err(ApiError::BadRequest(
+            "one or more selected engine versions no longer exist".to_string(),
+        ));
+    }
+    for version in &versions {
+        ensure_engine_supports_variant(version, pool.variant)?;
     }
 
     let tournament = Tournament {
@@ -699,73 +686,6 @@ async fn persist_terminal_match_state(
         event,
     )
     .await;
-    Ok(())
-}
-
-async fn finalize_human_game(
-    state: AppState,
-    session: HumanGameSession,
-    mut runtime: HumanGameRuntime,
-) -> Result<(), ApiError> {
-    state.human_games.remove(session.match_series.id).await;
-    let mut shutdown_logs = std::mem::take(&mut runtime.logs);
-    runtime.engine.shutdown(&mut shutdown_logs).await.ok();
-    runtime.logs = shutdown_logs;
-    let final_log = human_runtime_log(&session, &runtime, "game.finalized", "human game finalized");
-    push_runtime_log(&mut runtime.logs, final_log);
-    runtime.seq += 1;
-    let result = runtime.result.unwrap_or(GameResult::Draw);
-    let termination = runtime
-        .termination
-        .unwrap_or(arena_core::GameTermination::Unknown);
-    let completed_at = Utc::now();
-    let game = GameRecord {
-        id: Uuid::new_v4(),
-        tournament_id: runtime.tournament_id,
-        match_id: session.match_series.id,
-        pool_id: session.match_series.pool_id,
-        variant: runtime.variant,
-        opening_id: session.match_series.opening_id,
-        white_version_id: session.match_series.white_version_id,
-        black_version_id: session.match_series.black_version_id,
-        result,
-        termination,
-        start_fen: runtime.start_fen.clone(),
-        pgn: pgn_from_moves(
-            &session.name,
-            runtime.variant,
-            &runtime.start_fen,
-            &runtime.move_history,
-            result,
-        ),
-        moves_uci: runtime.move_history.clone(),
-        white_time_left_ms: runtime.white_time_left_ms,
-        black_time_left_ms: runtime.black_time_left_ms,
-        logs: runtime.logs.clone(),
-        started_at: runtime.started_at,
-        completed_at,
-    };
-    let checkpoint = human_checkpoint(&session, &runtime);
-    let event =
-        arena_core::LiveEventEnvelope::GameFinished(game_finished_from_checkpoint(&checkpoint));
-    persist_terminal_match_state(
-        &state,
-        CompletedGameTable::Human,
-        &game,
-        runtime.status,
-        TournamentStatus::Completed,
-        runtime.started_at,
-        checkpoint,
-        event,
-    )
-    .await?;
-    apply_human_pool_rating_update(
-        &state.db,
-        session.match_series.pool_id,
-        &game,
-        &session.human_player,
-    )
-    .await?;
     Ok(())
 }
 
@@ -868,9 +788,10 @@ async fn play_engine_match_pair(
 
     let first_game = play_server_owned_engine_game(
         state,
-        EngineMatchSession {
+        MatchSession {
             name: format!("{} vs {}", engine_a.version, engine_b.version),
             match_series: first_series.clone(),
+            completed_game_table: CompletedGameTable::Engine,
         },
         build_engine_runtime(
             tournament_id,
@@ -891,9 +812,10 @@ async fn play_engine_match_pair(
         update_match_series_status(&state.db, second_series.id, MatchStatus::Running).await?;
         let second_game = play_server_owned_engine_game(
             state,
-            EngineMatchSession {
+            MatchSession {
                 name: format!("{} vs {}", engine_b.version, engine_a.version),
                 match_series: second_series,
+                completed_game_table: CompletedGameTable::Engine,
             },
             build_engine_runtime(
                 tournament_id,
@@ -918,34 +840,6 @@ async fn play_engine_match_pair(
     })
 }
 
-struct EngineMatchSession {
-    name: String,
-    match_series: MatchSeries,
-}
-
-struct EngineMatchRuntime {
-    tournament_id: Uuid,
-    variant: Variant,
-    time_control: arena_core::TimeControl,
-    start_fen: String,
-    current_fen: String,
-    board: cozy_chess::Board,
-    repetitions: HashMap<u64, u8>,
-    move_history: Vec<String>,
-    white_time_left_ms: u64,
-    black_time_left_ms: u64,
-    max_plies: u16,
-    white_engine: Box<dyn AgentAdapter>,
-    black_engine: Box<dyn AgentAdapter>,
-    logs: Vec<arena_core::GameLogEntry>,
-    started_at: chrono::DateTime<Utc>,
-    turn_started_server_unix_ms: i64,
-    seq: u64,
-    result: Option<GameResult>,
-    termination: Option<arena_core::GameTermination>,
-    status: MatchStatus,
-}
-
 const CLOCK_SYNC_INTERVAL_MS: u64 = 1_000;
 
 async fn build_engine_runtime(
@@ -956,11 +850,16 @@ async fn build_engine_runtime(
     opening: Option<arena_core::OpeningPosition>,
     max_plies: u16,
     opening_seed: Option<u64>,
-) -> Result<EngineMatchRuntime, ApiError> {
-    let board = arena_runner::starting_board(pool.variant, opening.as_ref(), opening_seed);
+) -> Result<MatchRuntime, ApiError> {
+    ensure_engine_supports_variant(&white, pool.variant)?;
+    ensure_engine_supports_variant(&black, pool.variant)?;
+    let (board, start_fen) = resolve_start_state(MatchConfig {
+        variant: pool.variant,
+        opening: opening.as_ref(),
+        opening_seed,
+    })?;
     let initial_hash = board.hash_without_ep();
     let started_at = Utc::now();
-    let start_fen = board.to_string();
     let mut logs = Vec::new();
     let mut white_engine = build_adapter(white);
     let mut black_engine = build_adapter(black);
@@ -968,7 +867,7 @@ async fn build_engine_runtime(
     black_engine.prepare(pool.variant, &mut logs).await?;
     white_engine.begin_game(&mut logs).await?;
     black_engine.begin_game(&mut logs).await?;
-    Ok(EngineMatchRuntime {
+    Ok(MatchRuntime {
         tournament_id,
         variant: pool.variant,
         time_control: pool.time_control.clone(),
@@ -980,8 +879,12 @@ async fn build_engine_runtime(
         white_time_left_ms: pool.time_control.initial_ms,
         black_time_left_ms: pool.time_control.initial_ms,
         max_plies,
-        white_engine,
-        black_engine,
+        white_seat: MatchSeatController::Engine(EngineSeatController {
+            adapter: Some(white_engine),
+        }),
+        black_seat: MatchSeatController::Engine(EngineSeatController {
+            adapter: Some(black_engine),
+        }),
         logs,
         started_at,
         turn_started_server_unix_ms: started_at.timestamp_millis(),
@@ -994,221 +897,11 @@ async fn build_engine_runtime(
 
 async fn play_server_owned_engine_game(
     state: &AppState,
-    session: EngineMatchSession,
-    mut runtime: EngineMatchRuntime,
+    session: MatchSession,
+    runtime: MatchRuntime,
     publish_initial_snapshot: bool,
 ) -> Result<GameRecord, ApiError> {
-    if publish_initial_snapshot {
-        publish_engine_runtime(state, &session, &mut runtime, true).await?;
-    }
-
-    while runtime.status == MatchStatus::Running {
-        if let Some((result, termination)) = classify_position(&runtime.board, &runtime.repetitions)
-        {
-            runtime.result = Some(result);
-            runtime.termination = Some(termination);
-            runtime.status = MatchStatus::Completed;
-            break;
-        }
-        if runtime.move_history.len() as u16 >= runtime.max_plies {
-            runtime.result = Some(GameResult::Draw);
-            runtime.termination = Some(arena_core::GameTermination::MoveLimit);
-            runtime.status = MatchStatus::Completed;
-            break;
-        }
-        let side = runtime.board.side_to_move();
-        let remaining = if side == cozy_chess::Color::White {
-            runtime.white_time_left_ms
-        } else {
-            runtime.black_time_left_ms
-        };
-        let movetime_ms = calculate_move_budget(remaining, runtime.time_control.increment_ms);
-        let mut logs = std::mem::take(&mut runtime.logs);
-        let timeout = tokio::time::sleep(std::time::Duration::from_millis(remaining.max(1)));
-        tokio::pin!(timeout);
-        let sync = tokio::time::sleep(std::time::Duration::from_millis(
-            CLOCK_SYNC_INTERVAL_MS.min(remaining.max(1)),
-        ));
-        tokio::pin!(sync);
-        let sync_match_id = session.match_series.id;
-        let sync_fen = runtime.current_fen.clone();
-        let sync_moves = runtime.move_history.clone();
-        let sync_side_to_move = side_from_fen(&runtime.current_fen);
-        let selected = if side == cozy_chess::Color::White {
-            let choose = runtime.white_engine.choose_move(
-                &runtime.board,
-                &runtime.start_fen,
-                &runtime.move_history,
-                movetime_ms,
-                &mut logs,
-            );
-            tokio::pin!(choose);
-            loop {
-                tokio::select! {
-                    result = &mut choose => break Ok(result),
-                    _ = &mut timeout => break Err(()),
-                    _ = &mut sync => {
-                        emit_engine_clock_sync_during_turn(
-                            state,
-                            &mut runtime.seq,
-                            &mut runtime.white_time_left_ms,
-                            &mut runtime.black_time_left_ms,
-                            &mut runtime.turn_started_server_unix_ms,
-                            side,
-                            sync_match_id,
-                            &sync_fen,
-                            &sync_moves,
-                            sync_side_to_move,
-                        ).await;
-                        let next_remaining = if side == cozy_chess::Color::White {
-                            runtime.white_time_left_ms
-                        } else {
-                            runtime.black_time_left_ms
-                        }
-                        .saturating_sub(
-                            Utc::now()
-                                .timestamp_millis()
-                                .saturating_sub(runtime.turn_started_server_unix_ms) as u64,
-                        );
-                        let next_delay = CLOCK_SYNC_INTERVAL_MS.min(next_remaining.max(1));
-                        sync.as_mut().reset(tokio::time::Instant::now() + std::time::Duration::from_millis(next_delay));
-                    }
-                }
-            }
-        } else {
-            let choose = runtime.black_engine.choose_move(
-                &runtime.board,
-                &runtime.start_fen,
-                &runtime.move_history,
-                movetime_ms,
-                &mut logs,
-            );
-            tokio::pin!(choose);
-            loop {
-                tokio::select! {
-                    result = &mut choose => break Ok(result),
-                    _ = &mut timeout => break Err(()),
-                    _ = &mut sync => {
-                        emit_engine_clock_sync_during_turn(
-                            state,
-                            &mut runtime.seq,
-                            &mut runtime.white_time_left_ms,
-                            &mut runtime.black_time_left_ms,
-                            &mut runtime.turn_started_server_unix_ms,
-                            side,
-                            sync_match_id,
-                            &sync_fen,
-                            &sync_moves,
-                            sync_side_to_move,
-                        ).await;
-                        let next_remaining = if side == cozy_chess::Color::White {
-                            runtime.white_time_left_ms
-                        } else {
-                            runtime.black_time_left_ms
-                        }
-                        .saturating_sub(
-                            Utc::now()
-                                .timestamp_millis()
-                                .saturating_sub(runtime.turn_started_server_unix_ms) as u64,
-                        );
-                        let next_delay = CLOCK_SYNC_INTERVAL_MS.min(next_remaining.max(1));
-                        sync.as_mut().reset(tokio::time::Instant::now() + std::time::Duration::from_millis(next_delay));
-                    }
-                }
-            }
-        };
-        runtime.logs = logs;
-        let elapsed_ms = elapsed_since_turn_start_ms_engine(&runtime);
-        let clock = if side == cozy_chess::Color::White {
-            &mut runtime.white_time_left_ms
-        } else {
-            &mut runtime.black_time_left_ms
-        };
-        *clock = clock.saturating_sub(elapsed_ms);
-        let selected = match selected {
-            Ok(Ok(value)) if elapsed_ms < remaining => value,
-            Ok(Ok(_)) | Err(_) => {
-                if side == cozy_chess::Color::White {
-                    runtime.white_time_left_ms = 0;
-                    runtime.result = Some(GameResult::BlackWin);
-                } else {
-                    runtime.black_time_left_ms = 0;
-                    runtime.result = Some(GameResult::WhiteWin);
-                }
-                runtime.termination = Some(arena_core::GameTermination::Timeout);
-                runtime.status = MatchStatus::Completed;
-                state
-                    .live_metrics
-                    .timeout_fires
-                    .fetch_add(1, Ordering::Relaxed);
-                break;
-            }
-            Ok(Err(_)) => {
-                runtime.result = Some(if side == cozy_chess::Color::White {
-                    GameResult::BlackWin
-                } else {
-                    GameResult::WhiteWin
-                });
-                runtime.termination = Some(arena_core::GameTermination::EngineFailure);
-                runtime.status = MatchStatus::Completed;
-                break;
-            }
-        };
-
-        if selected == "0000" {
-            runtime.result = Some(GameResult::Draw);
-            runtime.termination = Some(arena_core::GameTermination::EngineFailure);
-            runtime.status = MatchStatus::Completed;
-            break;
-        }
-
-        let mv = cozy_chess::util::parse_uci_move(&runtime.board, &selected).map_err(|err| {
-            ApiError::Conflict(format!("engine returned invalid UCI move: {err}"))
-        })?;
-        if runtime.board.try_play(mv).is_err() {
-            runtime.result = Some(if side == cozy_chess::Color::White {
-                GameResult::BlackWin
-            } else {
-                GameResult::WhiteWin
-            });
-            runtime.termination = Some(arena_core::GameTermination::IllegalMove);
-            runtime.status = MatchStatus::Completed;
-            break;
-        }
-
-        runtime.move_history.push(selected);
-        runtime.current_fen = runtime.board.to_string();
-        *runtime
-            .repetitions
-            .entry(runtime.board.hash_without_ep())
-            .or_insert(0) += 1;
-        if side == cozy_chess::Color::White {
-            runtime.white_time_left_ms = runtime
-                .white_time_left_ms
-                .saturating_add(runtime.time_control.increment_ms);
-        } else {
-            runtime.black_time_left_ms = runtime
-                .black_time_left_ms
-                .saturating_add(runtime.time_control.increment_ms);
-        }
-        runtime.turn_started_server_unix_ms = Utc::now().timestamp_millis();
-        if let Some((result, termination)) = classify_position(&runtime.board, &runtime.repetitions)
-        {
-            runtime.result = Some(result);
-            runtime.termination = Some(termination);
-            runtime.status = MatchStatus::Completed;
-        } else if runtime.board.status() != cozy_chess::GameStatus::Ongoing {
-            let (result, termination) = classify_terminal_board(&runtime.board);
-            runtime.result = Some(result);
-            runtime.termination = Some(termination);
-            runtime.status = MatchStatus::Completed;
-        }
-        if runtime.status == MatchStatus::Running {
-            publish_engine_runtime(state, &session, &mut runtime, false).await?;
-        }
-    }
-
-    finalize_engine_game(state, session, runtime).await
+    run_match_to_completion(state, session, runtime, publish_initial_snapshot).await
 }
 
 pub(crate) async fn restore_engine_game(
@@ -1220,13 +913,8 @@ pub(crate) async fn restore_engine_game(
     let tournament = get_tournament(&state.db, match_series.tournament_id).await?;
     let white = get_agent_version(&state.db, match_series.white_version_id).await?;
     let black = get_agent_version(&state.db, match_series.black_version_id).await?;
-    let openings = load_pool_openings(&state.db, &pool).await?;
-    let opening = openings
-        .iter()
-        .find(|candidate| Some(candidate.id) == match_series.opening_id)
-        .cloned();
-    let mut board = arena_runner::starting_board(pool.variant, opening.as_ref(), None);
-    let start_fen = board.to_string();
+    let (mut board, start_fen) = parse_saved_board(pool.variant, &checkpoint.start_fen)
+        .map_err(|err| ApiError::Conflict(format!("failed to restore start FEN: {err}")))?;
     let mut repetitions = HashMap::from([(board.hash_without_ep(), 1_u8)]);
     for uci in &checkpoint.moves {
         let mv = cozy_chess::util::parse_uci_move(&board, uci)
@@ -1243,7 +931,7 @@ pub(crate) async fn restore_engine_game(
     black_engine.prepare(pool.variant, &mut logs).await?;
     white_engine.begin_game(&mut logs).await?;
     black_engine.begin_game(&mut logs).await?;
-    let runtime = EngineMatchRuntime {
+    let runtime = MatchRuntime {
         tournament_id: match_series.tournament_id,
         variant: pool.variant,
         time_control: pool.time_control.clone(),
@@ -1255,8 +943,12 @@ pub(crate) async fn restore_engine_game(
         white_time_left_ms: checkpoint.white_remaining_ms,
         black_time_left_ms: checkpoint.black_remaining_ms,
         max_plies: 300,
-        white_engine,
-        black_engine,
+        white_seat: MatchSeatController::Engine(EngineSeatController {
+            adapter: Some(white_engine),
+        }),
+        black_seat: MatchSeatController::Engine(EngineSeatController {
+            adapter: Some(black_engine),
+        }),
         logs,
         started_at: tournament.started_at.unwrap_or(match_series.created_at),
         turn_started_server_unix_ms: checkpoint.turn_started_server_unix_ms,
@@ -1265,59 +957,19 @@ pub(crate) async fn restore_engine_game(
         termination: None,
         status: MatchStatus::Running,
     };
-    let session = EngineMatchSession {
+    let session = MatchSession {
         name: tournament.name,
         match_series,
+        completed_game_table: CompletedGameTable::Engine,
     };
     let state = state.clone();
     tokio::spawn(async move {
-        let _ = play_server_owned_engine_game(&state, session, runtime, false).await;
+        let _ = run_match_to_completion(&state, session, runtime, false).await;
     });
     Ok(())
 }
 
-async fn publish_engine_runtime(
-    state: &AppState,
-    session: &EngineMatchSession,
-    runtime: &mut EngineMatchRuntime,
-    initial: bool,
-) -> Result<(), ApiError> {
-    if !initial && runtime.status != MatchStatus::Running {
-        return Ok(());
-    }
-    runtime.seq += 1;
-    let checkpoint = engine_checkpoint(session, runtime);
-    let event_name = if initial {
-        "live.snapshot"
-    } else {
-        "live.move_published"
-    };
-    let runtime_log_entry = engine_runtime_log(
-        session,
-        runtime,
-        event_name,
-        format!("engine runtime event {}", runtime.seq),
-    );
-    push_runtime_log(&mut runtime.logs, runtime_log_entry);
-    let event = if initial {
-        arena_core::LiveEventEnvelope::Snapshot(snapshot_from_checkpoint(&checkpoint))
-    } else {
-        arena_core::LiveEventEnvelope::MoveCommitted(move_committed_from_checkpoint(&checkpoint))
-    };
-    publish_with_metrics(
-        &state.live_matches,
-        &state.db,
-        Some(&state.live_metrics),
-        checkpoint,
-        event,
-    )
-    .await
-}
-
-fn engine_checkpoint(
-    session: &EngineMatchSession,
-    runtime: &EngineMatchRuntime,
-) -> LiveRuntimeCheckpoint {
+fn match_checkpoint(session: &MatchSession, runtime: &MatchRuntime) -> LiveRuntimeCheckpoint {
     let updated_at = Utc::now();
     LiveRuntimeCheckpoint {
         match_id: session.match_series.id,
@@ -1331,6 +983,7 @@ fn engine_checkpoint(
             .termination
             .map(live_termination_from_game_termination)
             .unwrap_or(arena_core::LiveTermination::None),
+        start_fen: runtime.start_fen.clone(),
         fen: runtime.current_fen.clone(),
         moves: runtime.move_history.clone(),
         white_remaining_ms: runtime.white_time_left_ms,
@@ -1345,18 +998,26 @@ fn engine_checkpoint(
     }
 }
 
-async fn finalize_engine_game(
+async fn finalize_match_game(
     state: &AppState,
-    session: EngineMatchSession,
-    mut runtime: EngineMatchRuntime,
+    session: MatchSession,
+    mut runtime: MatchRuntime,
 ) -> Result<GameRecord, ApiError> {
-    runtime.white_engine.shutdown(&mut runtime.logs).await.ok();
-    runtime.black_engine.shutdown(&mut runtime.logs).await.ok();
-    let final_log = engine_runtime_log(
+    let human_player = match (&runtime.white_seat, &runtime.black_seat) {
+        (MatchSeatController::Human(controller), _) => Some(controller.player.clone()),
+        (_, MatchSeatController::Human(controller)) => Some(controller.player.clone()),
+        _ => None,
+    };
+    shutdown_match_seats(&mut runtime).await;
+    if runtime.has_human_seat() {
+        state.human_games.remove(session.match_series.id).await;
+    }
+    let final_log = match_runtime_log(
         &session,
         &runtime,
+        match_runtime_source(&session),
         "game.finalized",
-        "engine game finalized",
+        "game finalized",
     );
     push_runtime_log(&mut runtime.logs, final_log);
     runtime.seq += 1;
@@ -1391,12 +1052,12 @@ async fn finalize_engine_game(
         started_at: runtime.started_at,
         completed_at,
     };
-    let checkpoint = engine_checkpoint(&session, &runtime);
+    let checkpoint = match_checkpoint(&session, &runtime);
     let event =
         arena_core::LiveEventEnvelope::GameFinished(game_finished_from_checkpoint(&checkpoint));
     persist_terminal_match_state(
         state,
-        CompletedGameTable::Engine,
+        session.completed_game_table,
         &game,
         MatchStatus::Completed,
         TournamentStatus::Completed,
@@ -1405,16 +1066,43 @@ async fn finalize_engine_game(
         event,
     )
     .await?;
+    if let Some(human_player) = human_player {
+        apply_human_pool_rating_update(
+            &state.db,
+            session.match_series.pool_id,
+            &game,
+            &human_player,
+        )
+        .await?;
+    }
     Ok(game)
 }
 
-fn elapsed_since_turn_start_ms(runtime: &HumanGameRuntime) -> u64 {
+fn match_runtime_source(session: &MatchSession) -> &'static str {
+    match session.completed_game_table {
+        CompletedGameTable::Engine => "server.engine_runtime",
+        CompletedGameTable::Human => "server.human_runtime",
+    }
+}
+
+async fn shutdown_match_seats(runtime: &mut MatchRuntime) {
+    for seat in [&mut runtime.white_seat, &mut runtime.black_seat] {
+        if let MatchSeatController::Engine(engine) = seat {
+            if let Some(mut adapter) = engine.adapter.take() {
+                adapter.shutdown(&mut runtime.logs).await.ok();
+                engine.adapter = Some(adapter);
+            }
+        }
+    }
+}
+
+fn elapsed_since_turn_start_ms(runtime: &MatchRuntime) -> u64 {
     Utc::now()
         .timestamp_millis()
         .saturating_sub(runtime.turn_started_server_unix_ms) as u64
 }
 
-fn remaining_turn_time_ms(runtime: &HumanGameRuntime) -> u64 {
+fn remaining_turn_time_ms(runtime: &MatchRuntime) -> u64 {
     let remaining = if runtime.board.side_to_move() == cozy_chess::Color::White {
         runtime.white_time_left_ms
     } else {
@@ -1423,64 +1111,11 @@ fn remaining_turn_time_ms(runtime: &HumanGameRuntime) -> u64 {
     remaining.saturating_sub(elapsed_since_turn_start_ms(runtime))
 }
 
-fn elapsed_since_turn_start_ms_engine(runtime: &EngineMatchRuntime) -> u64 {
-    Utc::now()
-        .timestamp_millis()
-        .saturating_sub(runtime.turn_started_server_unix_ms) as u64
-}
-
-async fn emit_engine_clock_sync_during_turn(
+async fn emit_match_clock_sync(
     state: &AppState,
-    seq: &mut u64,
-    white_time_left_ms: &mut u64,
-    black_time_left_ms: &mut u64,
-    turn_started_server_unix_ms: &mut i64,
-    side: cozy_chess::Color,
-    match_id: Uuid,
-    fen: &str,
-    moves: &[String],
-    side_to_move: arena_core::ProtocolLiveSide,
-) {
-    let elapsed_ms = Utc::now()
-        .timestamp_millis()
-        .saturating_sub(*turn_started_server_unix_ms) as u64;
-    if elapsed_ms == 0 {
-        return;
-    }
-    if side == cozy_chess::Color::White {
-        *white_time_left_ms = (*white_time_left_ms).saturating_sub(elapsed_ms);
-    } else {
-        *black_time_left_ms = (*black_time_left_ms).saturating_sub(elapsed_ms);
-    }
-    *turn_started_server_unix_ms = Utc::now().timestamp_millis();
-    *seq += 1;
-    let checkpoint = LiveRuntimeCheckpoint {
-        match_id,
-        seq: *seq,
-        status: live_status_from_match_status(MatchStatus::Running),
-        result: arena_core::LiveResult::None,
-        termination: arena_core::LiveTermination::None,
-        fen: fen.to_string(),
-        moves: moves.to_vec(),
-        white_remaining_ms: *white_time_left_ms,
-        black_remaining_ms: *black_time_left_ms,
-        side_to_move,
-        turn_started_server_unix_ms: *turn_started_server_unix_ms,
-        updated_at: Utc::now(),
-    };
-    publish_transient_with_metrics(
-        &state.live_matches,
-        Some(&state.live_metrics),
-        checkpoint.clone(),
-        arena_core::LiveEventEnvelope::ClockSync(clock_sync_from_checkpoint(&checkpoint)),
-    )
-    .await;
-}
-
-async fn emit_human_clock_sync(
-    state: &AppState,
-    session: &HumanGameSession,
-    runtime: &mut HumanGameRuntime,
+    session: &MatchSession,
+    runtime: &mut MatchRuntime,
+    source: &str,
 ) -> Result<(), ApiError> {
     if runtime.status != MatchStatus::Running {
         return Ok(());
@@ -1496,12 +1131,13 @@ async fn emit_human_clock_sync(
     }
     runtime.turn_started_server_unix_ms = Utc::now().timestamp_millis();
     runtime.seq += 1;
-    let checkpoint = human_checkpoint(session, runtime);
-    let clock_log = human_runtime_log(
+    let checkpoint = match_checkpoint(session, runtime);
+    let clock_log = match_runtime_log(
         session,
         runtime,
+        source,
         "clock.sync_emitted",
-        "human clock sync emitted",
+        "clock sync emitted",
     );
     push_runtime_log(&mut runtime.logs, clock_log);
     publish_transient_with_metrics(
@@ -1514,10 +1150,11 @@ async fn emit_human_clock_sync(
     Ok(())
 }
 
-async fn finalize_human_timeout(
+async fn finalize_timeout(
     state: &AppState,
-    session: &HumanGameSession,
-    runtime: &mut HumanGameRuntime,
+    session: &MatchSession,
+    runtime: &mut MatchRuntime,
+    source: &str,
 ) -> Result<(), ApiError> {
     if runtime.status != MatchStatus::Running {
         return Ok(());
@@ -1536,32 +1173,33 @@ async fn finalize_human_timeout(
     } else {
         runtime.black_time_left_ms = 0;
     }
-    let timeout_log = human_runtime_log(session, runtime, "timeout.fired", "human timeout fired");
+    let timeout_log = match_runtime_log(session, runtime, source, "timeout.fired", "timeout fired");
     push_runtime_log(&mut runtime.logs, timeout_log);
-    publish_human_runtime(state, session, runtime, false).await
+    publish_match_runtime(state, session, runtime, false).await
 }
 
-async fn publish_human_runtime(
+async fn publish_match_runtime(
     state: &AppState,
-    session: &HumanGameSession,
-    runtime: &mut HumanGameRuntime,
+    session: &MatchSession,
+    runtime: &mut MatchRuntime,
     initial: bool,
 ) -> Result<(), ApiError> {
     if !initial && runtime.status != MatchStatus::Running {
         return Ok(());
     }
     runtime.seq += 1;
-    let checkpoint = human_checkpoint(session, runtime);
+    let checkpoint = match_checkpoint(session, runtime);
     let event_name = if initial {
         "live.snapshot"
     } else {
         "live.move_published"
     };
-    let runtime_log_entry = human_runtime_log(
+    let runtime_log_entry = match_runtime_log(
         session,
         runtime,
+        match_runtime_source(session),
         event_name,
-        format!("human runtime event {}", runtime.seq),
+        format!("runtime event {}", runtime.seq),
     );
     push_runtime_log(&mut runtime.logs, runtime_log_entry);
     let event = if initial {
@@ -1579,48 +1217,20 @@ async fn publish_human_runtime(
     .await
 }
 
-fn human_checkpoint(
-    session: &HumanGameSession,
-    runtime: &HumanGameRuntime,
-) -> LiveRuntimeCheckpoint {
-    let updated_at = Utc::now();
-    LiveRuntimeCheckpoint {
-        match_id: session.match_series.id,
-        seq: runtime.seq,
-        status: live_status_from_match_status(runtime.status),
-        result: runtime
-            .result
-            .map(live_result_from_game_result)
-            .unwrap_or(arena_core::LiveResult::None),
-        termination: runtime
-            .termination
-            .map(live_termination_from_game_termination)
-            .unwrap_or(arena_core::LiveTermination::None),
-        fen: runtime.current_fen.clone(),
-        moves: runtime.move_history.clone(),
-        white_remaining_ms: runtime.white_time_left_ms,
-        black_remaining_ms: runtime.black_time_left_ms,
-        side_to_move: if runtime.status == MatchStatus::Running {
-            side_from_fen(&runtime.current_fen)
-        } else {
-            arena_core::ProtocolLiveSide::None
-        },
-        turn_started_server_unix_ms: runtime.turn_started_server_unix_ms,
-        updated_at,
-    }
-}
-
 async fn process_human_move(
     state: &AppState,
-    session: &HumanGameSession,
-    runtime: &mut HumanGameRuntime,
+    session: &MatchSession,
+    runtime: &mut MatchRuntime,
+    side: cozy_chess::Color,
     move_context: MoveDebugContext,
 ) -> HumanMoveAck {
+    let source = match_runtime_source(session);
     let intent_id = move_context.intent_id;
     let move_uci = move_context.move_uci.clone();
-    let submitted_log = human_runtime_log(
+    let submitted_log = match_runtime_log(
         session,
         runtime,
+        source,
         "move.submitted",
         format!("human submitted {move_uci}"),
     )
@@ -1632,58 +1242,61 @@ async fn process_human_move(
         "request_id": move_context.request_id,
     }));
     push_runtime_log(&mut runtime.logs, submitted_log);
-    if let Some(previous) = runtime.seen_intents.get(&intent_id).copied() {
-        return previous;
+    {
+        let seen_intents = match side {
+            cozy_chess::Color::White => match &mut runtime.white_seat {
+                MatchSeatController::Human(controller) => &mut controller.seen_intents,
+                MatchSeatController::Engine(_) => return HumanMoveAck::RejectedNotYourTurn,
+            },
+            cozy_chess::Color::Black => match &mut runtime.black_seat {
+                MatchSeatController::Human(controller) => &mut controller.seen_intents,
+                MatchSeatController::Engine(_) => return HumanMoveAck::RejectedNotYourTurn,
+            },
+        };
+        if let Some(previous) = seen_intents.get(&intent_id).copied() {
+            return previous;
+        }
     }
     if runtime.status != MatchStatus::Running {
-        let rejected_log = human_runtime_log(
+        let rejected_log = match_runtime_log(
             session,
             runtime,
+            source,
             "move.rejected_finished",
             "human move rejected because game is finished",
         )
         .with_move_uci(move_uci)
         .with_fields(json!({ "intent_id": intent_id }));
         push_runtime_log(&mut runtime.logs, rejected_log);
-        runtime
-            .seen_intents
-            .insert(intent_id, HumanMoveAck::RejectedGameFinished);
+        insert_human_ack(runtime, side, intent_id, HumanMoveAck::RejectedGameFinished);
         return HumanMoveAck::RejectedGameFinished;
     }
-    let human_side = if session.match_series.white_version_id == session.human_player.id {
-        cozy_chess::Color::White
-    } else {
-        cozy_chess::Color::Black
-    };
-    if runtime.board.side_to_move() != human_side {
-        let rejected_log = human_runtime_log(
+    if runtime.board.side_to_move() != side {
+        let rejected_log = match_runtime_log(
             session,
             runtime,
+            source,
             "move.rejected_wrong_turn",
             "human move rejected because it is not the human turn",
         )
         .with_move_uci(move_uci)
         .with_fields(json!({ "intent_id": intent_id }));
         push_runtime_log(&mut runtime.logs, rejected_log);
-        runtime
-            .seen_intents
-            .insert(intent_id, HumanMoveAck::RejectedNotYourTurn);
+        insert_human_ack(runtime, side, intent_id, HumanMoveAck::RejectedNotYourTurn);
         return HumanMoveAck::RejectedNotYourTurn;
     }
     if runtime.move_history.len() as u16 >= runtime.max_plies {
         runtime.result = Some(GameResult::Draw);
         runtime.termination = Some(arena_core::GameTermination::MoveLimit);
         runtime.status = MatchStatus::Completed;
-        let _ = publish_human_runtime(state, session, runtime, false).await;
-        runtime
-            .seen_intents
-            .insert(intent_id, HumanMoveAck::RejectedGameFinished);
+        let _ = publish_match_runtime(state, session, runtime, false).await;
+        insert_human_ack(runtime, side, intent_id, HumanMoveAck::RejectedGameFinished);
         return HumanMoveAck::RejectedGameFinished;
     }
     let handled_at = Utc::now();
     let elapsed_ms = elapsed_since_turn_start_ms(runtime);
     let increment_ms = runtime.time_control.increment_ms;
-    let clock = if human_side == cozy_chess::Color::White {
+    let clock = if side == cozy_chess::Color::White {
         &mut runtime.white_time_left_ms
     } else {
         &mut runtime.black_time_left_ms
@@ -1691,7 +1304,7 @@ async fn process_human_move(
     let remaining_before = *clock;
     *clock = clock.saturating_sub(elapsed_ms);
     if elapsed_ms >= remaining_before {
-        runtime.result = Some(if human_side == cozy_chess::Color::White {
+        runtime.result = Some(if side == cozy_chess::Color::White {
             GameResult::BlackWin
         } else {
             GameResult::WhiteWin
@@ -1699,104 +1312,97 @@ async fn process_human_move(
         runtime.termination = Some(arena_core::GameTermination::Timeout);
         runtime.status = MatchStatus::Completed;
         *clock = 0;
-        let timeout_log = human_runtime_log(
+        let timeout_log = match_runtime_log(
             session,
             runtime,
+            source,
             "timeout.fired",
             "human move arrived after remaining clock expired",
         )
         .with_fields(json!({ "intent_id": intent_id }));
         push_runtime_log(&mut runtime.logs, timeout_log);
-        let _ = publish_human_runtime(state, session, runtime, false).await;
-        runtime
-            .seen_intents
-            .insert(intent_id, HumanMoveAck::RejectedGameFinished);
+        let _ = publish_match_runtime(state, session, runtime, false).await;
+        insert_human_ack(runtime, side, intent_id, HumanMoveAck::RejectedGameFinished);
         return HumanMoveAck::RejectedGameFinished;
     }
     let Ok(mv) = cozy_chess::util::parse_uci_move(&runtime.board, &move_uci) else {
-        let rejected_log = human_runtime_log(
+        let rejected_log = match_runtime_log(
             session,
             runtime,
+            source,
             "move.rejected_illegal",
             "human move rejected because UCI parsing failed",
         )
         .with_move_uci(move_uci)
         .with_fields(json!({ "intent_id": intent_id }));
         push_runtime_log(&mut runtime.logs, rejected_log);
-        runtime
-            .seen_intents
-            .insert(intent_id, HumanMoveAck::RejectedIllegal);
+        insert_human_ack(runtime, side, intent_id, HumanMoveAck::RejectedIllegal);
         return HumanMoveAck::RejectedIllegal;
     };
     if runtime.board.try_play(mv).is_err() {
-        let rejected_log = human_runtime_log(
+        let rejected_log = match_runtime_log(
             session,
             runtime,
+            source,
             "move.rejected_illegal",
             "human move rejected because it is illegal in the current position",
         )
         .with_move_uci(move_uci)
         .with_fields(json!({ "intent_id": intent_id }));
         push_runtime_log(&mut runtime.logs, rejected_log);
-        runtime
-            .seen_intents
-            .insert(intent_id, HumanMoveAck::RejectedIllegal);
+        insert_human_ack(runtime, side, intent_id, HumanMoveAck::RejectedIllegal);
         return HumanMoveAck::RejectedIllegal;
     }
     runtime.move_history.push(move_uci.clone());
-    runtime.current_fen = format!("{}", runtime.board);
+    runtime.current_fen = fen_for_variant(&runtime.board, runtime.variant);
     let board_hash = runtime.board.hash_without_ep();
     *runtime.repetitions.entry(board_hash).or_insert(0) += 1;
-    if human_side == cozy_chess::Color::White {
+    if side == cozy_chess::Color::White {
         runtime.white_time_left_ms = runtime.white_time_left_ms.saturating_add(increment_ms);
     } else {
         runtime.black_time_left_ms = runtime.black_time_left_ms.saturating_add(increment_ms);
     }
     runtime.turn_started_server_unix_ms = handled_at.timestamp_millis();
-    let accepted_log = human_runtime_log(session, runtime, "move.accepted", "human move accepted")
-        .with_move_uci(move_uci)
-        .with_fields(json!({
-            "intent_id": intent_id,
-            "client_action_id": move_context.client_action_id,
-            "ws_connection_id": move_context.ws_connection_id,
-        }));
+    let accepted_log = match_runtime_log(
+        session,
+        runtime,
+        source,
+        "move.accepted",
+        "human move accepted",
+    )
+    .with_move_uci(move_uci)
+    .with_fields(json!({
+        "intent_id": intent_id,
+        "client_action_id": move_context.client_action_id,
+        "ws_connection_id": move_context.ws_connection_id,
+    }));
     push_runtime_log(&mut runtime.logs, accepted_log);
-    if let Some((result, termination)) = classify_position(&runtime.board, &runtime.repetitions) {
-        runtime.result = Some(result);
-        runtime.termination = Some(termination);
-        runtime.status = MatchStatus::Completed;
-    } else if runtime.board.status() != cozy_chess::GameStatus::Ongoing {
-        let (result, termination) = classify_terminal_board(&runtime.board);
-        runtime.result = Some(result);
-        runtime.termination = Some(termination);
-        runtime.status = MatchStatus::Completed;
-    }
-    let _ = publish_human_runtime(state, session, runtime, false).await;
-    runtime
-        .seen_intents
-        .insert(intent_id, HumanMoveAck::Accepted);
+    update_terminal_state(runtime);
+    let _ = publish_match_runtime(state, session, runtime, false).await;
+    insert_human_ack(runtime, side, intent_id, HumanMoveAck::Accepted);
     HumanMoveAck::Accepted
 }
 
 async fn process_engine_turn(
     state: &AppState,
-    session: &HumanGameSession,
-    runtime: &mut HumanGameRuntime,
+    session: &MatchSession,
+    runtime: &mut MatchRuntime,
+    side: cozy_chess::Color,
 ) -> Result<(), ApiError> {
-    if runtime.status != MatchStatus::Running || runtime.board.side_to_move() != runtime.engine_side
-    {
+    let source = match_runtime_source(session);
+    if runtime.status != MatchStatus::Running || runtime.board.side_to_move() != side {
         return Ok(());
     }
     if runtime.move_history.len() as u16 >= runtime.max_plies {
         runtime.result = Some(GameResult::Draw);
         runtime.termination = Some(arena_core::GameTermination::MoveLimit);
         runtime.status = MatchStatus::Completed;
-        publish_human_runtime(state, session, runtime, false).await?;
+        publish_match_runtime(state, session, runtime, false).await?;
         return Ok(());
     }
     let increment_ms = runtime.time_control.increment_ms;
     let movetime_ms = calculate_move_budget(
-        if runtime.engine_side == cozy_chess::Color::White {
+        if side == cozy_chess::Color::White {
             runtime.white_time_left_ms
         } else {
             runtime.black_time_left_ms
@@ -1807,49 +1413,83 @@ async fn process_engine_turn(
     let move_history = runtime.move_history.clone();
     let board = runtime.board.clone();
     let handled_at = Utc::now();
-    let elapsed_started = Instant::now();
-    let started_log = human_runtime_log(
+    let started_log = match_runtime_log(
         session,
         runtime,
+        source,
         "engine.turn_started",
         "engine turn started",
     );
     push_runtime_log(&mut runtime.logs, started_log);
+    let remaining = if side == cozy_chess::Color::White {
+        runtime.white_time_left_ms
+    } else {
+        runtime.black_time_left_ms
+    };
     let mut logs = std::mem::take(&mut runtime.logs);
-    let selected = runtime
-        .engine
-        .choose_move(&board, &start_fen, &move_history, movetime_ms, &mut logs)
-        .await;
+    let mut adapter = take_engine_adapter(runtime, side)?;
+    let timeout = tokio::time::sleep(std::time::Duration::from_millis(remaining.max(1)));
+    tokio::pin!(timeout);
+    let sync = tokio::time::sleep(std::time::Duration::from_millis(
+        CLOCK_SYNC_INTERVAL_MS.min(remaining.max(1)),
+    ));
+    tokio::pin!(sync);
+    enum EngineTurnOutcome {
+        Move(String),
+        Timeout,
+        Error(anyhow::Error),
+    }
+
+    let selected = {
+        let choose = adapter.choose_move(&board, &start_fen, &move_history, movetime_ms, &mut logs);
+        tokio::pin!(choose);
+        loop {
+            tokio::select! {
+                result = &mut choose => break match result {
+                    Ok(selected) => EngineTurnOutcome::Move(selected),
+                    Err(err) => EngineTurnOutcome::Error(err),
+                },
+                _ = &mut timeout => break EngineTurnOutcome::Timeout,
+                _ = &mut sync => {
+                    emit_match_clock_sync(state, session, runtime, source).await?;
+                    let next_delay = CLOCK_SYNC_INTERVAL_MS.min(remaining_turn_time_ms(runtime).max(1));
+                    sync.as_mut().reset(tokio::time::Instant::now() + std::time::Duration::from_millis(next_delay));
+                }
+            }
+        }
+    };
+    restore_engine_adapter(runtime, side, adapter);
     runtime.logs = logs;
-    let elapsed_ms = elapsed_started.elapsed().as_millis() as u64;
-    let clock = if runtime.engine_side == cozy_chess::Color::White {
+    let elapsed_ms = elapsed_since_turn_start_ms(runtime);
+    let clock = if side == cozy_chess::Color::White {
         &mut runtime.white_time_left_ms
     } else {
         &mut runtime.black_time_left_ms
     };
-    let remaining = *clock;
     *clock = clock.saturating_sub(elapsed_ms);
     match selected {
-        Ok(selected) => {
-            let returned_log = human_runtime_log(
+        EngineTurnOutcome::Move(selected) => {
+            let returned_log = match_runtime_log(
                 session,
                 runtime,
+                source,
                 "engine.move_returned",
                 format!("engine returned {selected}"),
             )
             .with_move_uci(selected.clone());
             push_runtime_log(&mut runtime.logs, returned_log);
             if elapsed_ms >= remaining {
-                runtime.result = Some(if runtime.engine_side == cozy_chess::Color::White {
+                runtime.result = Some(if side == cozy_chess::Color::White {
                     GameResult::BlackWin
                 } else {
                     GameResult::WhiteWin
                 });
                 runtime.termination = Some(arena_core::GameTermination::Timeout);
                 runtime.status = MatchStatus::Completed;
-                let timeout_log = human_runtime_log(
+                let timeout_log = match_runtime_log(
                     session,
                     runtime,
+                    source,
                     "timeout.fired",
                     "engine exceeded remaining time",
                 );
@@ -1860,7 +1500,7 @@ async fn process_engine_turn(
                 runtime.status = MatchStatus::Completed;
             } else if let Ok(mv) = cozy_chess::util::parse_uci_move(&runtime.board, &selected) {
                 if runtime.board.try_play(mv).is_err() {
-                    runtime.result = Some(if runtime.engine_side == cozy_chess::Color::White {
+                    runtime.result = Some(if side == cozy_chess::Color::White {
                         GameResult::BlackWin
                     } else {
                         GameResult::WhiteWin
@@ -1869,10 +1509,10 @@ async fn process_engine_turn(
                     runtime.status = MatchStatus::Completed;
                 } else {
                     runtime.move_history.push(selected);
-                    runtime.current_fen = format!("{}", runtime.board);
+                    runtime.current_fen = fen_for_variant(&runtime.board, runtime.variant);
                     let board_hash = runtime.board.hash_without_ep();
                     *runtime.repetitions.entry(board_hash).or_insert(0) += 1;
-                    if runtime.engine_side == cozy_chess::Color::White {
+                    if side == cozy_chess::Color::White {
                         runtime.white_time_left_ms =
                             runtime.white_time_left_ms.saturating_add(increment_ms);
                     } else {
@@ -1880,21 +1520,10 @@ async fn process_engine_turn(
                             runtime.black_time_left_ms.saturating_add(increment_ms);
                     }
                     runtime.turn_started_server_unix_ms = handled_at.timestamp_millis();
-                    if let Some((result, termination)) =
-                        classify_position(&runtime.board, &runtime.repetitions)
-                    {
-                        runtime.result = Some(result);
-                        runtime.termination = Some(termination);
-                        runtime.status = MatchStatus::Completed;
-                    } else if runtime.board.status() != cozy_chess::GameStatus::Ongoing {
-                        let (result, termination) = classify_terminal_board(&runtime.board);
-                        runtime.result = Some(result);
-                        runtime.termination = Some(termination);
-                        runtime.status = MatchStatus::Completed;
-                    }
+                    update_terminal_state(runtime);
                 }
             } else {
-                runtime.result = Some(if runtime.engine_side == cozy_chess::Color::White {
+                runtime.result = Some(if side == cozy_chess::Color::White {
                     GameResult::BlackWin
                 } else {
                     GameResult::WhiteWin
@@ -1903,23 +1532,211 @@ async fn process_engine_turn(
                 runtime.status = MatchStatus::Completed;
             }
         }
-        Err(_) => {
-            runtime.result = Some(if runtime.engine_side == cozy_chess::Color::White {
+        EngineTurnOutcome::Timeout => {
+            runtime.result = Some(if side == cozy_chess::Color::White {
+                GameResult::BlackWin
+            } else {
+                GameResult::WhiteWin
+            });
+            runtime.termination = Some(arena_core::GameTermination::Timeout);
+            runtime.status = MatchStatus::Completed;
+        }
+        EngineTurnOutcome::Error(err) => {
+            runtime.result = Some(if side == cozy_chess::Color::White {
                 GameResult::BlackWin
             } else {
                 GameResult::WhiteWin
             });
             runtime.termination = Some(arena_core::GameTermination::EngineFailure);
             runtime.status = MatchStatus::Completed;
+            let failure_log = match_runtime_log(
+                session,
+                runtime,
+                source,
+                "engine.move_failed",
+                format!("engine move selection failed: {err}"),
+            );
+            push_runtime_log(&mut runtime.logs, failure_log);
         }
     }
-    publish_human_runtime(state, session, runtime, false).await
+    publish_match_runtime(state, session, runtime, false).await
+}
+
+fn insert_human_ack(
+    runtime: &mut MatchRuntime,
+    side: cozy_chess::Color,
+    intent_id: Uuid,
+    ack: HumanMoveAck,
+) {
+    let seen_intents = match side {
+        cozy_chess::Color::White => match &mut runtime.white_seat {
+            MatchSeatController::Human(controller) => &mut controller.seen_intents,
+            MatchSeatController::Engine(_) => return,
+        },
+        cozy_chess::Color::Black => match &mut runtime.black_seat {
+            MatchSeatController::Human(controller) => &mut controller.seen_intents,
+            MatchSeatController::Engine(_) => return,
+        },
+    };
+    seen_intents.insert(intent_id, ack);
+}
+
+fn update_terminal_state(runtime: &mut MatchRuntime) {
+    if let Some((result, termination)) = classify_position(&runtime.board, &runtime.repetitions) {
+        runtime.result = Some(result);
+        runtime.termination = Some(termination);
+        runtime.status = MatchStatus::Completed;
+    } else if runtime.board.status() != cozy_chess::GameStatus::Ongoing {
+        let (result, termination) = classify_terminal_board(&runtime.board);
+        runtime.result = Some(result);
+        runtime.termination = Some(termination);
+        runtime.status = MatchStatus::Completed;
+    }
+}
+
+fn take_engine_adapter(
+    runtime: &mut MatchRuntime,
+    side: cozy_chess::Color,
+) -> Result<Box<dyn AgentAdapter>, ApiError> {
+    match side {
+        cozy_chess::Color::White => match &mut runtime.white_seat {
+            MatchSeatController::Engine(controller) => controller
+                .adapter
+                .take()
+                .ok_or_else(|| ApiError::Conflict("white engine seat unavailable".to_string())),
+            MatchSeatController::Human(_) => Err(ApiError::Conflict(
+                "white seat is not engine-controlled".to_string(),
+            )),
+        },
+        cozy_chess::Color::Black => match &mut runtime.black_seat {
+            MatchSeatController::Engine(controller) => controller
+                .adapter
+                .take()
+                .ok_or_else(|| ApiError::Conflict("black engine seat unavailable".to_string())),
+            MatchSeatController::Human(_) => Err(ApiError::Conflict(
+                "black seat is not engine-controlled".to_string(),
+            )),
+        },
+    }
+}
+
+fn restore_engine_adapter(
+    runtime: &mut MatchRuntime,
+    side: cozy_chess::Color,
+    adapter: Box<dyn AgentAdapter>,
+) {
+    match side {
+        cozy_chess::Color::White => {
+            if let MatchSeatController::Engine(controller) = &mut runtime.white_seat {
+                controller.adapter = Some(adapter);
+            }
+        }
+        cozy_chess::Color::Black => {
+            if let MatchSeatController::Engine(controller) = &mut runtime.black_seat {
+                controller.adapter = Some(adapter);
+            }
+        }
+    }
+}
+
+async fn process_human_turn(
+    state: &AppState,
+    session: &MatchSession,
+    runtime: &mut MatchRuntime,
+    side: cozy_chess::Color,
+) -> Result<(), ApiError> {
+    let source = match_runtime_source(session);
+    let timeout_delay = remaining_turn_time_ms(runtime);
+    if timeout_delay == 0 {
+        state
+            .live_metrics
+            .timeout_fires
+            .fetch_add(1, Ordering::Relaxed);
+        return finalize_timeout(state, session, runtime, source).await;
+    }
+    let sleep = tokio::time::sleep(std::time::Duration::from_millis(timeout_delay));
+    tokio::pin!(sleep);
+    let sync = tokio::time::sleep(std::time::Duration::from_millis(
+        CLOCK_SYNC_INTERVAL_MS.min(timeout_delay),
+    ));
+    tokio::pin!(sync);
+    loop {
+        let command_opt = match side {
+            cozy_chess::Color::White => match &mut runtime.white_seat {
+                MatchSeatController::Human(controller) => {
+                    tokio::select! {
+                        maybe_command = controller.command_rx.recv() => maybe_command,
+                        _ = &mut sleep => {
+                            state.live_metrics.timeout_fires.fetch_add(1, Ordering::Relaxed);
+                            finalize_timeout(state, session, runtime, source).await?;
+                            return Ok(());
+                        }
+                        _ = &mut sync => {
+                            emit_match_clock_sync(state, session, runtime, source).await?;
+                            let next_delay = CLOCK_SYNC_INTERVAL_MS.min(remaining_turn_time_ms(runtime).max(1));
+                            sync.as_mut().reset(tokio::time::Instant::now() + std::time::Duration::from_millis(next_delay));
+                            continue;
+                        }
+                    }
+                }
+                MatchSeatController::Engine(_) => return Ok(()),
+            },
+            cozy_chess::Color::Black => match &mut runtime.black_seat {
+                MatchSeatController::Human(controller) => {
+                    tokio::select! {
+                        maybe_command = controller.command_rx.recv() => maybe_command,
+                        _ = &mut sleep => {
+                            state.live_metrics.timeout_fires.fetch_add(1, Ordering::Relaxed);
+                            finalize_timeout(state, session, runtime, source).await?;
+                            return Ok(());
+                        }
+                        _ = &mut sync => {
+                            emit_match_clock_sync(state, session, runtime, source).await?;
+                            let next_delay = CLOCK_SYNC_INTERVAL_MS.min(remaining_turn_time_ms(runtime).max(1));
+                            sync.as_mut().reset(tokio::time::Instant::now() + std::time::Duration::from_millis(next_delay));
+                            continue;
+                        }
+                    }
+                }
+                MatchSeatController::Engine(_) => return Ok(()),
+            },
+        };
+        let Some(command) = command_opt else {
+            return Ok(());
+        };
+        match command {
+            HumanGameCommand::SubmitMove {
+                intent_id,
+                client_action_id,
+                ws_connection_id,
+                move_uci,
+                respond_to,
+            } => {
+                let ack = process_human_move(
+                    state,
+                    session,
+                    runtime,
+                    side,
+                    MoveDebugContext {
+                        request_id: None,
+                        client_action_id,
+                        ws_connection_id,
+                        intent_id,
+                        move_uci,
+                    },
+                )
+                .await;
+                let _ = respond_to.send(ack);
+                return Ok(());
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arena_core::{GameLogEntry, TimeControl};
+    use arena_core::{GameLogEntry, TimeControl, Variant};
     use arena_runner::AgentAdapter;
     use async_trait::async_trait;
     use sqlx::sqlite::SqlitePoolOptions;
@@ -1992,9 +1809,9 @@ mod tests {
 
     async fn session_and_runtime(
         state: &AppState,
-        engine_side: cozy_chess::Color,
+        _engine_side: cozy_chess::Color,
         human_plays_white: bool,
-    ) -> (HumanGameSession, HumanGameRuntime) {
+    ) -> (MatchSession, MatchRuntime) {
         let pool = crate::storage::list_pools(&state.db)
             .await
             .unwrap()
@@ -2047,15 +1864,30 @@ mod tests {
             status: MatchStatus::Running,
             created_at: Utc::now(),
         };
-        let (command_tx, _command_rx) = tokio::sync::mpsc::channel(1);
-        let session = HumanGameSession {
+        let (command_tx, command_rx) = tokio::sync::mpsc::channel(1);
+        let session = MatchSession {
             name: "test".to_string(),
             match_series: match_series.clone(),
-            human_player,
-            command_tx,
+            completed_game_table: CompletedGameTable::Human,
         };
         let board = cozy_chess::Board::default();
-        let runtime = HumanGameRuntime {
+        let human_seat = MatchSeatController::Human(HumanSeatController {
+            player: human_player,
+            command_rx,
+            seen_intents: HashMap::new(),
+        });
+        let engine_seat = MatchSeatController::Engine(EngineSeatController {
+            adapter: Some(Box::new(SleepyAdapter {
+                delay_ms: 0,
+                move_uci: "e2e4".to_string(),
+            })),
+        });
+        let (white_seat, black_seat) = if human_plays_white {
+            (human_seat, engine_seat)
+        } else {
+            (engine_seat, human_seat)
+        };
+        let runtime = MatchRuntime {
             tournament_id: match_series.tournament_id,
             variant: Variant::Standard,
             time_control: TimeControl {
@@ -2070,20 +1902,18 @@ mod tests {
             white_time_left_ms: 50,
             black_time_left_ms: 50,
             max_plies: 300,
-            engine_side,
-            engine: Box::new(SleepyAdapter {
-                delay_ms: 0,
-                move_uci: "e2e4".to_string(),
-            }),
+            white_seat,
+            black_seat,
             logs: Vec::new(),
             started_at: Utc::now(),
             turn_started_server_unix_ms: Utc::now().timestamp_millis(),
             seq: 0,
-            seen_intents: HashMap::new(),
             result: None,
             termination: None,
             status: MatchStatus::Running,
         };
+        let handle = HumanGameHandle { command_tx };
+        state.human_games.insert(match_series.id, handle).await;
         (session, runtime)
     }
 
@@ -2099,6 +1929,7 @@ mod tests {
             &state,
             &session,
             &mut runtime,
+            cozy_chess::Color::White,
             MoveDebugContext {
                 request_id: None,
                 client_action_id: None,
@@ -2115,7 +1946,7 @@ mod tests {
             runtime.termination,
             Some(arena_core::GameTermination::Timeout)
         );
-        finalize_human_game(state.clone(), session.clone(), runtime)
+        finalize_match_game(&state, session.clone(), runtime)
             .await
             .unwrap();
         let snapshot = state
@@ -2133,12 +1964,14 @@ mod tests {
         let (session, mut runtime) =
             session_and_runtime(&state, cozy_chess::Color::White, false).await;
         runtime.white_time_left_ms = 20;
-        runtime.engine = Box::new(SleepyAdapter {
-            delay_ms: 40,
-            move_uci: "e2e4".to_string(),
+        runtime.white_seat = MatchSeatController::Engine(EngineSeatController {
+            adapter: Some(Box::new(SleepyAdapter {
+                delay_ms: 40,
+                move_uci: "e2e4".to_string(),
+            })),
         });
 
-        process_engine_turn(&state, &session, &mut runtime)
+        process_engine_turn(&state, &session, &mut runtime, cozy_chess::Color::White)
             .await
             .unwrap();
 
@@ -2147,7 +1980,7 @@ mod tests {
             runtime.termination,
             Some(arena_core::GameTermination::Timeout)
         );
-        finalize_human_game(state.clone(), session.clone(), runtime)
+        finalize_match_game(&state, session.clone(), runtime)
             .await
             .unwrap();
         let snapshot = state
@@ -2166,14 +1999,11 @@ mod tests {
             session_and_runtime(&state, cozy_chess::Color::Black, true).await;
         runtime.white_time_left_ms = 10;
         runtime.turn_started_server_unix_ms -= 20;
-        state.human_games.insert(session.clone()).await;
-        let (_command_tx, command_rx) = tokio::sync::mpsc::channel(1);
 
-        tokio::spawn(run_human_game_owner(
+        tokio::spawn(run_match_owner(
             state.clone(),
             session.clone(),
             runtime,
-            command_rx,
             true,
         ));
 

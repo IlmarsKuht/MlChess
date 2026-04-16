@@ -80,6 +80,7 @@ const snapshot: LiveMatchSnapshot = {
   status: "running",
   result: "none",
   termination: "none",
+  start_fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
   fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
   moves: [],
   white_remaining_ms: 60000,

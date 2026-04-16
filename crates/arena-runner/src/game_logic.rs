@@ -19,6 +19,14 @@ pub fn starting_board(
     }
 }
 
+pub fn fen_for_variant(board: &Board, variant: Variant) -> String {
+    if variant.is_chess960() {
+        format!("{board:#}")
+    } else {
+        board.to_string()
+    }
+}
+
 pub fn calculate_move_budget(remaining_ms: u64, increment_ms: u64) -> u64 {
     let base = (remaining_ms / 30).max(50);
     base.saturating_add(increment_ms).min(remaining_ms.max(50))

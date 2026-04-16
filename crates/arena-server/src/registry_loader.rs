@@ -97,7 +97,7 @@ struct EngineManifest {
     tags: Vec<String>,
     notes: Option<String>,
     documentation: Option<String>,
-    supports_chess960: bool,
+    supported_variants: Vec<Variant>,
     executable_path: String,
     working_directory: Option<String>,
     args: Vec<String>,
@@ -136,7 +136,7 @@ struct CargoArenaMetadata {
     notes: Option<String>,
     documentation: Option<String>,
     documentation_file: Option<String>,
-    supports_chess960: Option<bool>,
+    supported_variants: Option<Vec<String>>,
 }
 
 pub(crate) fn collect_registry_files(workspace_root: &Path) -> Result<Vec<PathBuf>> {
@@ -306,7 +306,9 @@ fn load_rust_engines(workspace_root: &Path) -> Result<Vec<EngineManifest>> {
                 normalize_optional_string(arena.documentation),
                 normalize_optional_string(arena.documentation_file),
             )?,
-            supports_chess960: arena.supports_chess960.unwrap_or(true),
+            supported_variants: parse_supported_variants(
+                arena.supported_variants.unwrap_or_default(),
+            )?,
             executable_path: rust_engine_binary_path(workspace_root, &package.name),
             working_directory: Some(workspace_dir.clone()),
             args: Vec::new(),
@@ -396,7 +398,9 @@ fn load_command_engines(workspace_root: &Path) -> Result<Vec<EngineManifest>> {
                 normalize_optional_string(document.optional_string("documentation")?),
                 normalize_optional_string(document.optional_string("documentation_file")?),
             )?,
-            supports_chess960: document.optional_bool("supports_chess960")?.unwrap_or(true),
+            supported_variants: parse_supported_variants(
+                document.optional_string_array("supported_variants")?,
+            )?,
             executable_path,
             working_directory,
             args: document.optional_string_array("args")?,
@@ -459,7 +463,7 @@ fn split_engine_registrations(
             args: manifest.args,
             env: manifest.env,
             capabilities: AgentCapabilities {
-                supports_chess960: manifest.supports_chess960,
+                supported_variants: manifest.supported_variants,
             },
             declared_name: manifest.declared_name,
             tags: manifest.tags,
@@ -729,6 +733,23 @@ fn parse_variant(value: &str) -> Result<Variant> {
         "chess960" => Ok(Variant::Chess960),
         _ => bail!("unsupported variant {value}"),
     }
+}
+
+fn parse_supported_variants(values: Vec<String>) -> Result<Vec<Variant>> {
+    let mut supported_variants = if values.is_empty() {
+        vec![Variant::Standard, Variant::Chess960]
+    } else {
+        values
+            .into_iter()
+            .map(|value| parse_variant(&value))
+            .collect::<Result<Vec<_>>>()?
+    };
+    supported_variants.sort_by_key(|variant| match variant {
+        Variant::Standard => 0_u8,
+        Variant::Chess960 => 1_u8,
+    });
+    supported_variants.dedup();
+    Ok(supported_variants)
 }
 
 fn parse_tournament_kind(value: &str) -> Result<TournamentKind> {

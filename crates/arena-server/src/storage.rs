@@ -1045,13 +1045,14 @@ where
 {
     sqlx::query(
         "INSERT INTO live_runtime_checkpoints (
-            match_id, seq, status, result, termination, fen, moves, white_remaining_ms, black_remaining_ms, side_to_move, turn_started_server_unix_ms, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            match_id, seq, status, result, termination, start_fen, fen, moves, white_remaining_ms, black_remaining_ms, side_to_move, turn_started_server_unix_ms, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(match_id) DO UPDATE SET
             seq = excluded.seq,
             status = excluded.status,
             result = excluded.result,
             termination = excluded.termination,
+            start_fen = excluded.start_fen,
             fen = excluded.fen,
             moves = excluded.moves,
             white_remaining_ms = excluded.white_remaining_ms,
@@ -1065,6 +1066,7 @@ where
     .bind(encode_json(&checkpoint.status)?)
     .bind(encode_json(&checkpoint.result)?)
     .bind(encode_json(&checkpoint.termination)?)
+    .bind(&checkpoint.start_fen)
     .bind(&checkpoint.fen)
     .bind(encode_json(&checkpoint.moves)?)
     .bind(checkpoint.white_remaining_ms as i64)
@@ -1334,6 +1336,7 @@ fn live_runtime_checkpoint_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Live
         status: decode_json(&row.get::<String, _>("status"))?,
         result: decode_json(&row.get::<String, _>("result"))?,
         termination: decode_json(&row.get::<String, _>("termination"))?,
+        start_fen: row.get("start_fen"),
         fen: row.get("fen"),
         moves: decode_json(&row.get::<String, _>("moves"))?,
         white_remaining_ms: row.get::<i64, _>("white_remaining_ms") as u64,

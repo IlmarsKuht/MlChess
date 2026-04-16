@@ -2,8 +2,12 @@ import { FormEvent, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { useFlash } from "../../app/providers/FlashProvider";
+import type { Variant } from "../../app/types";
 import { useAgentsQuery, useAgentVersionsQuery, useHumanProfileQuery, usePoolsQuery } from "../../shared/queries/arena";
 import { EngineSideCard, Field, RouteErrorState, RouteLoadingState } from "../../shared/ui";
+import { formatTimeControl, formatVariant } from "../../shared/lib/format";
+import { findPoolForChoices, timeControlKey, uniquePoolTimeControls, uniquePoolVariants } from "../../shared/lib/pools";
+import { supportsVariant } from "../../shared/lib/variants";
 import { useStartHumanGameMutation } from "./api";
 
 export function HumanGamePage() {
@@ -15,23 +19,44 @@ export function HumanGamePage() {
   const humanProfile = useHumanProfileQuery();
   const startHumanGame = useStartHumanGameMutation();
   const [humanGameName, setHumanGameName] = useState("");
-  const [humanPoolId, setHumanPoolId] = useState("");
+  const [humanVariant, setHumanVariant] = useState<Variant | "">("");
+  const [humanTimeControlKey, setHumanTimeControlKey] = useState("");
   const [humanEngineId, setHumanEngineId] = useState("");
   const [humanSide, setHumanSide] = useState<"white" | "black" | "random">("random");
 
-  const standardPools = (pools.data ?? []).filter((pool) => pool.variant === "standard");
+  const playablePools = pools.data ?? [];
+  const variantChoices = uniquePoolVariants(playablePools);
+  const timeControlChoices = uniquePoolTimeControls(playablePools);
+  const selectedPool = humanVariant ? findPoolForChoices(playablePools, humanVariant, humanTimeControlKey) : null;
+  const compatibleVersions = humanVariant
+    ? (versions.data ?? []).filter((version) => supportsVariant(version, humanVariant))
+    : (versions.data ?? []);
 
   useEffect(() => {
-    if (!humanPoolId && standardPools[0]) {
-      setHumanPoolId(standardPools[0].id);
+    if (!humanVariant && variantChoices[0]) {
+      setHumanVariant(variantChoices[0]);
     }
-  }, [humanPoolId, standardPools]);
+  }, [humanVariant, variantChoices]);
 
   useEffect(() => {
-    if (!humanEngineId && versions.data?.[0]) {
-      setHumanEngineId(versions.data[0].id);
+    if (!humanTimeControlKey && timeControlChoices[0]) {
+      setHumanTimeControlKey(timeControlKey(timeControlChoices[0]));
     }
-  }, [humanEngineId, versions.data]);
+  }, [humanTimeControlKey, timeControlChoices]);
+
+  useEffect(() => {
+    if (humanEngineId && selectedPool) {
+      const currentVersion = versions.data?.find((version) => version.id === humanEngineId);
+      if (currentVersion && supportsVariant(currentVersion, selectedPool.variant)) {
+        return;
+      }
+      setHumanEngineId("");
+      return;
+    }
+    if (!humanEngineId && compatibleVersions[0]) {
+      setHumanEngineId(compatibleVersions[0].id);
+    }
+  }, [compatibleVersions, humanEngineId, selectedPool, versions.data]);
 
   if (agents.isLoading || versions.isLoading || pools.isLoading || humanProfile.isLoading) {
     return <RouteLoadingState message="Loading human game setup..." />;
@@ -53,8 +78,8 @@ export function HumanGamePage() {
   async function submitHumanGame(event: FormEvent) {
     event.preventDefault();
 
-    if (!humanPoolId || !humanEngineId) {
-      showError("Pick a standard format and an engine first.");
+    if (!selectedPool || !humanEngineId) {
+      showError("Pick a chess type, time control, and compatible engine first.");
       return;
     }
 
@@ -64,7 +89,7 @@ export function HumanGamePage() {
     try {
       const response = await startHumanGame.mutateAsync({
         name: chosenName,
-        pool_id: humanPoolId,
+        pool_id: selectedPool.id,
         engine_version_id: humanEngineId,
         human_side: humanSide
       });
@@ -82,7 +107,7 @@ export function HumanGamePage() {
         <span>{humanProfile.data ? `Your Elo ${humanProfile.data.rating.toFixed(1)}` : "Ready to play"}</span>
       </div>
       <p className="panel-copy">
-        Pick any engine, choose your side, and play a live standard game that updates both your Elo and the
+        Pick any compatible engine, choose your side, and play a live game that updates both your Elo and the
         engine&apos;s Elo. After launch you&apos;ll land on the fullscreen board with clocks, move list, and a clearer
         end-of-game result screen.
       </p>
@@ -95,21 +120,49 @@ export function HumanGamePage() {
             placeholder="Example: Me vs MiniMax"
           />
         </Field>
-        <Field label="Standard format">
-          <select value={humanPoolId} onChange={(event) => setHumanPoolId(event.target.value)} required>
-            <option value="">Select standard format</option>
-            {standardPools.map((pool) => (
-              <option key={pool.id} value={pool.id}>
-                {pool.name}
-              </option>
-            ))}
-          </select>
-        </Field>
+        <div className="two-up">
+          <Field label="Chess type">
+            <select value={humanVariant} onChange={(event) => setHumanVariant(event.target.value as Variant)} required>
+              <option value="">Select chess type</option>
+              {variantChoices.map((variant) => (
+                <option key={variant} value={variant}>
+                  {formatVariant(variant)}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Time control">
+            <select value={humanTimeControlKey} onChange={(event) => setHumanTimeControlKey(event.target.value)} required>
+              <option value="">Select time control</option>
+              {timeControlChoices.map((timeControl) => (
+                <option key={timeControlKey(timeControl)} value={timeControlKey(timeControl)}>
+                  {formatTimeControl(timeControl)}
+                </option>
+              ))}
+            </select>
+          </Field>
+        </div>
+        {!selectedPool && humanVariant && humanTimeControlKey ? (
+          <div className="result-strip">
+            <strong>Unavailable combination</strong>
+            <span>
+              This chess type and time control are not registered together yet.
+            </span>
+          </div>
+        ) : null}
+        {selectedPool ? (
+          <div className="result-strip">
+            <strong>Selected setup</strong>
+            <span>
+              {formatVariant(selectedPool.variant)} • {formatTimeControl(selectedPool.time_control)}
+            </span>
+          </div>
+        ) : null}
         <div className="two-up">
           <Field label="Engine">
             <select value={humanEngineId} onChange={(event) => setHumanEngineId(event.target.value)} required>
               <option value="">Select engine</option>
-              {(versions.data ?? []).map((version) => (
+              {compatibleVersions.map((version) => (
                 <option key={version.id} value={version.id}>
                   {versionNameById[version.id]}
                 </option>

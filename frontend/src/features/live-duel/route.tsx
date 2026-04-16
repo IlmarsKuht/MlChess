@@ -2,8 +2,11 @@ import { FormEvent, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { useFlash } from "../../app/providers/FlashProvider";
-import { formatLabel, roundLabel } from "../../shared/lib/format";
+import type { Variant } from "../../app/types";
+import { formatLabel, formatTimeControl, formatVariant, roundLabel } from "../../shared/lib/format";
 import { participantName } from "../../shared/lib/participants";
+import { findPoolForChoices, timeControlKey, uniquePoolTimeControls, uniquePoolVariants } from "../../shared/lib/pools";
+import { supportsVariant } from "../../shared/lib/variants";
 import { useAgentVersionsQuery, useMatchesQuery, usePoolsQuery, useTournamentsQuery, useAgentsQuery } from "../../shared/queries/arena";
 import { EmptyState, EngineSideCard, Field, RouteErrorState, RouteLoadingState } from "../../shared/ui";
 import { lastWatchedKey } from "../watch/model";
@@ -19,7 +22,8 @@ export function LiveDuelPage() {
   const tournaments = useTournamentsQuery(3000);
   const createDuel = useCreateLiveDuelMutation();
   const [duelName, setDuelName] = useState("");
-  const [duelPoolId, setDuelPoolId] = useState("");
+  const [duelVariant, setDuelVariant] = useState<Variant | "">("");
+  const [duelTimeControlKey, setDuelTimeControlKey] = useState("");
   const [duelWhiteId, setDuelWhiteId] = useState("");
   const [duelBlackId, setDuelBlackId] = useState("");
   const [lastWatchedMatchId] = useState(() => {
@@ -31,30 +35,18 @@ export function LiveDuelPage() {
   });
 
   useEffect(() => {
-    if (!duelPoolId && pools.data?.[0]) {
-      setDuelPoolId(pools.data[0].id);
+    const variantChoices = uniquePoolVariants(pools.data ?? []);
+    if (!duelVariant && variantChoices[0]) {
+      setDuelVariant(variantChoices[0]);
     }
-  }, [duelPoolId, pools.data]);
+  }, [duelVariant, pools.data]);
 
   useEffect(() => {
-    if (!duelWhiteId && versions.data?.[0]) {
-      setDuelWhiteId(versions.data[0].id);
+    const timeControlChoices = uniquePoolTimeControls(pools.data ?? []);
+    if (!duelTimeControlKey && timeControlChoices[0]) {
+      setDuelTimeControlKey(timeControlKey(timeControlChoices[0]));
     }
-    if (!duelBlackId && versions.data?.[1]) {
-      setDuelBlackId(versions.data[1].id);
-    } else if (!duelBlackId && versions.data?.[0]) {
-      setDuelBlackId(versions.data[0].id);
-    }
-  }, [duelBlackId, duelWhiteId, versions.data]);
-
-  if (agents.isLoading || versions.isLoading || pools.isLoading || matches.isLoading || tournaments.isLoading) {
-    return <RouteLoadingState message="Loading duel controls..." />;
-  }
-
-  const error = agents.error ?? versions.error ?? pools.error ?? matches.error ?? tournaments.error;
-  if (error) {
-    return <RouteErrorState message={error.message} />;
-  }
+  }, [duelTimeControlKey, pools.data]);
 
   const agentNameById = Object.fromEntries((agents.data ?? []).map((agent) => [agent.id, agent.name]));
   const versionNameById = Object.fromEntries(
@@ -66,13 +58,45 @@ export function LiveDuelPage() {
   const runningMatches = (matches.data ?? []).filter((match) => match.status === "running" && match.watch_state === "live");
   const tournamentById = Object.fromEntries((tournaments.data ?? []).map((tournament) => [tournament.id, tournament]));
   const poolNameById = Object.fromEntries((pools.data ?? []).map((pool) => [pool.id, pool.name]));
+  const variantChoices = uniquePoolVariants(pools.data ?? []);
+  const timeControlChoices = uniquePoolTimeControls(pools.data ?? []);
+  const selectedPool = duelVariant ? findPoolForChoices(pools.data ?? [], duelVariant, duelTimeControlKey) : null;
+  const compatibleVersions = (versions.data ?? []).filter((version) =>
+    duelVariant ? supportsVariant(version, duelVariant) : true
+  );
   const resumableMatch = runningMatches.find((match) => match.id === lastWatchedMatchId) ?? null;
+
+  useEffect(() => {
+    if (duelWhiteId && !compatibleVersions.some((version) => version.id === duelWhiteId)) {
+      setDuelWhiteId("");
+    }
+    if (duelBlackId && !compatibleVersions.some((version) => version.id === duelBlackId)) {
+      setDuelBlackId("");
+    }
+    if (!duelWhiteId && compatibleVersions[0]) {
+      setDuelWhiteId(compatibleVersions[0].id);
+    }
+    if (!duelBlackId && compatibleVersions[1]) {
+      setDuelBlackId(compatibleVersions[1].id);
+    } else if (!duelBlackId && compatibleVersions[0]) {
+      setDuelBlackId(compatibleVersions[0].id);
+    }
+  }, [compatibleVersions, duelBlackId, duelWhiteId]);
+
+  if (agents.isLoading || versions.isLoading || pools.isLoading || matches.isLoading || tournaments.isLoading) {
+    return <RouteLoadingState message="Loading duel controls..." />;
+  }
+
+  const error = agents.error ?? versions.error ?? pools.error ?? matches.error ?? tournaments.error;
+  if (error) {
+    return <RouteErrorState message={error.message} />;
+  }
 
   async function submitLiveDuel(event: FormEvent) {
     event.preventDefault();
 
-    if (!duelWhiteId || !duelBlackId) {
-      showError("Pick two engines for the live duel.");
+    if (!duelWhiteId || !duelBlackId || !selectedPool) {
+      showError("Pick a chess type, time control, and two engines for the live duel.");
       return;
     }
 
@@ -88,7 +112,7 @@ export function LiveDuelPage() {
     try {
       const result = await createDuel.mutateAsync({
         name,
-        pool_id: duelPoolId,
+        pool_id: selectedPool.id,
         white_version_id: duelWhiteId,
         black_version_id: duelBlackId
       });
@@ -124,21 +148,47 @@ export function LiveDuelPage() {
               placeholder="Example: MiniMax vs King Safety"
             />
           </Field>
-          <Field label="Format">
-            <select value={duelPoolId} onChange={(event) => setDuelPoolId(event.target.value)} required>
-              <option value="">Select format</option>
-              {(pools.data ?? []).map((pool) => (
-                <option key={pool.id} value={pool.id}>
-                  {pool.name}
-                </option>
-              ))}
-            </select>
-          </Field>
+          <div className="two-up">
+            <Field label="Chess type">
+              <select value={duelVariant} onChange={(event) => setDuelVariant(event.target.value as Variant)} required>
+                <option value="">Select chess type</option>
+                {variantChoices.map((variant) => (
+                  <option key={variant} value={variant}>
+                    {formatVariant(variant)}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Time control">
+              <select value={duelTimeControlKey} onChange={(event) => setDuelTimeControlKey(event.target.value)} required>
+                <option value="">Select time control</option>
+                {timeControlChoices.map((timeControl) => (
+                  <option key={timeControlKey(timeControl)} value={timeControlKey(timeControl)}>
+                    {formatTimeControl(timeControl)}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          </div>
+          {!selectedPool && duelVariant && duelTimeControlKey ? (
+            <div className="result-strip">
+              <strong>Unavailable combination</strong>
+              <span>This chess type and time control are not registered together yet.</span>
+            </div>
+          ) : null}
+          {selectedPool ? (
+            <div className="result-strip">
+              <strong>Selected setup</strong>
+              <span>
+                {formatVariant(selectedPool.variant)} • {formatTimeControl(selectedPool.time_control)}
+              </span>
+            </div>
+          ) : null}
           <div className="two-up">
             <Field label="White engine">
               <select value={duelWhiteId} onChange={(event) => setDuelWhiteId(event.target.value)} required>
                 <option value="">Select engine</option>
-                {(versions.data ?? []).map((version) => (
+                {compatibleVersions.map((version) => (
                   <option key={version.id} value={version.id}>
                     {versionNameById[version.id]}
                   </option>
@@ -148,7 +198,7 @@ export function LiveDuelPage() {
             <Field label="Black engine">
               <select value={duelBlackId} onChange={(event) => setDuelBlackId(event.target.value)} required>
                 <option value="">Select engine</option>
-                {(versions.data ?? []).map((version) => (
+                {compatibleVersions.map((version) => (
                   <option key={version.id} value={version.id}>
                     {versionNameById[version.id]}
                   </option>

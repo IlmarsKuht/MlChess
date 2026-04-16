@@ -70,7 +70,7 @@ export function ReplayPage() {
 
       {replay.data && (
         <div className="replay-content">
-          {replay.data.variant === "standard" && boardSquares.length > 0 ? (
+          {boardSquares.length > 0 ? (
             <div className="board-stage">
               <BoardView squares={boardSquares} />
               <div className="scrubber-row">
@@ -87,9 +87,7 @@ export function ReplayPage() {
               </div>
             </div>
           ) : (
-            <EmptyState>
-              Board replay is shown for standard games. Chess960 games still include move and result details.
-            </EmptyState>
+            <EmptyState>Board replay is unavailable for this game.</EmptyState>
           )}
 
           <div className="replay-meta">

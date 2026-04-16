@@ -15,6 +15,7 @@ use uuid::Uuid;
 use crate::live::ReplayResult;
 use crate::{
     ApiError,
+    gameplay::build_replay_frames,
     orchestration::{
         create_human_game, create_tournament_run, load_human_player_profile,
         resolve_preset_participants, submit_human_move,
@@ -1019,10 +1020,16 @@ async fn get_game_replay_handler(
     Path(id): Path<Uuid>,
 ) -> Result<Json<ReplayPayload>, ApiError> {
     let game = get_game(&state.db, id).await?;
+    let frames = build_replay_frames(game.variant, &game.start_fen, &game.moves_uci)?;
+    let start_fen = frames
+        .first()
+        .cloned()
+        .unwrap_or_else(|| game.start_fen.clone());
     Ok(Json(ReplayPayload {
         id: game.id,
         variant: game.variant,
-        start_fen: game.start_fen,
+        frames,
+        start_fen,
         pgn: game.pgn,
         moves_uci: game.moves_uci,
         result: game.result,
@@ -1323,6 +1330,7 @@ mod tests {
             status: LiveStatus::Running,
             result: LiveResult::None,
             termination: LiveTermination::None,
+            start_fen: "4k3/8/8/8/8/8/8/4K3 w - - 0 1".to_string(),
             fen: if moves.is_empty() {
                 "4k3/8/8/8/8/8/8/4K3 w - - 0 1".to_string()
             } else {
@@ -1923,7 +1931,10 @@ mod tests {
             .unwrap();
         let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let first = payload.as_array().and_then(|items| items.first()).unwrap();
-        assert_eq!(first.get("status").and_then(Value::as_str), Some("completed"));
+        assert_eq!(
+            first.get("status").and_then(Value::as_str),
+            Some("completed")
+        );
     }
 
     #[tokio::test]

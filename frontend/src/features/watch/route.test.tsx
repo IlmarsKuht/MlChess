@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   useTournamentsQueryMock: vi.fn(),
   useConfirmedLiveMatchMock: vi.fn(),
   useLivePlaybackMock: vi.fn(),
+  useReplayQueryMock: vi.fn(),
   setUiDebugStateMock: vi.fn()
 }));
 
@@ -28,6 +29,10 @@ vi.mock("./live", () => ({
 
 vi.mock("./livePlayback", () => ({
   useLivePlayback: mocks.useLivePlaybackMock
+}));
+
+vi.mock("../replay/api", () => ({
+  useReplayQuery: mocks.useReplayQueryMock
 }));
 
 vi.mock("../../app/debug", () => ({
@@ -72,6 +77,7 @@ const finishedSnapshot: LiveMatchSnapshot = {
   status: "finished",
   result: "white_win",
   termination: "timeout",
+  start_fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
   fen: "2kr1b1r/1ppbq1pp/p1n2p2/4p3/3PB3/5N2/PPP1QPPP/R1B1R1K1 b - d3 0 12",
   moves: [
     "g1f3",
@@ -140,6 +146,7 @@ const runningSnapshot: LiveMatchSnapshot = {
   status: "running",
   result: "none",
   termination: "none",
+  start_fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
   fen: "rnbqkbnr/pppp1ppp/8/4p3/3P4/5N2/PPP1PPPP/RNBQKB1R b KQkq - 1 2",
   moves: ["d2d4", "e7e5", "g1f3"],
   white_remaining_ms: 4800,
@@ -199,6 +206,7 @@ describe("WatchPage", () => {
       returnToLive: vi.fn(),
       setSelectedLivePly: vi.fn()
     });
+    mocks.useReplayQueryMock.mockReturnValue({ data: null });
 
     render(
       <MemoryRouter initialEntries={[`/watch/${match.id}`]}>
@@ -261,6 +269,7 @@ describe("WatchPage", () => {
       returnToLive: vi.fn(),
       setSelectedLivePly: vi.fn()
     });
+    mocks.useReplayQueryMock.mockReturnValue({ data: null });
 
     render(
       <MemoryRouter initialEntries={[`/watch/${runningMatch.id}`]}>

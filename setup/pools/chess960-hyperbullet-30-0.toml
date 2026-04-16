@@ -1,0 +1,9 @@
+registry_key = "chess960-hyperbullet-30-0"
+name = "Chess960 HyperBullet 30+0"
+description = "Chess960, 30 seconds with no increment, paired colors."
+variant = "chess960"
+initial_ms = 30000
+increment_ms = 0
+paired_games = true
+swap_colors = true
+active = true

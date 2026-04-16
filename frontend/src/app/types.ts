@@ -57,6 +57,9 @@ export interface AgentVersion {
   executable_path: string;
   working_directory?: string | null;
   args: string[];
+  capabilities?: {
+    supported_variants: Variant[];
+  };
   declared_name?: string | null;
   tags: string[];
   notes?: string | null;
@@ -162,6 +165,7 @@ export interface ReplayPayload {
   id: string;
   variant: Variant;
   start_fen: string;
+  frames: string[];
   pgn: string;
   moves_uci: string[];
   result: GameResult;
@@ -177,6 +181,7 @@ export interface LiveMatchSnapshot {
   status: LiveStatus;
   result: LiveResult;
   termination: GameTermination;
+  start_fen: string;
   fen: string;
   moves: string[];
   white_remaining_ms: number;
@@ -193,6 +198,7 @@ export interface MoveCommittedEvent {
   server_now_unix_ms: number;
   status: LiveStatus;
   move_uci: string;
+  start_fen: string;
   fen: string;
   moves: string[];
   white_remaining_ms: number;
@@ -223,6 +229,7 @@ export interface GameFinishedEvent {
   status: LiveStatus;
   result: LiveResult;
   termination: GameTermination;
+  start_fen: string;
   fen: string;
   moves: string[];
   white_remaining_ms: number;

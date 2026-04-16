@@ -181,6 +181,7 @@ pub(crate) async fn init_db(db: &SqlitePool) -> Result<()> {
             status TEXT NOT NULL,
             result TEXT NOT NULL,
             termination TEXT NOT NULL,
+            start_fen TEXT NOT NULL,
             fen TEXT NOT NULL,
             moves TEXT NOT NULL,
             white_remaining_ms INTEGER NOT NULL,
@@ -233,6 +234,13 @@ pub(crate) async fn init_db(db: &SqlitePool) -> Result<()> {
     ensure_column(db, "benchmark_pools", "registry_key", "TEXT").await?;
     ensure_column(db, "opening_suites", "registry_key", "TEXT").await?;
     ensure_column(db, "event_presets", "registry_key", "TEXT").await?;
+    ensure_column(
+        db,
+        "live_runtime_checkpoints",
+        "start_fen",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+    .await?;
     ensure_foreign_key_schema(db).await?;
     for statement in [
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_registry_key ON agents(registry_key) WHERE registry_key IS NOT NULL",

@@ -17,8 +17,8 @@ use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::{
-    calculate_move_budget, classify_position, classify_terminal_board, pgn_from_moves,
-    starting_board, uci::UciAgentAdapter,
+    calculate_move_budget, classify_position, classify_terminal_board, fen_for_variant,
+    pgn_from_moves, starting_board, uci::UciAgentAdapter,
 };
 
 #[derive(Clone)]
@@ -112,7 +112,7 @@ pub async fn play_single_game(request: MatchRequest) -> Result<GameRecord> {
         request.opening.as_ref(),
         request.opening_seed,
     );
-    let start_fen = board.to_string();
+    let start_fen = fen_for_variant(&board, request.variant);
     let mut current_fen = start_fen.clone();
     let mut move_history = Vec::<String>::new();
     let mut white_time_left_ms = request.time_control.initial_ms;
@@ -229,7 +229,7 @@ pub async fn play_single_game(request: MatchRequest) -> Result<GameRecord> {
         }
 
         move_history.push(selected);
-        current_fen = board.to_string();
+        current_fen = fen_for_variant(&board, request.variant);
         *repetitions.entry(board.hash_without_ep()).or_insert(0) += 1;
 
         publish_live_state(
@@ -401,7 +401,7 @@ mod tests {
             args: Vec::new(),
             env: BTreeMap::new(),
             capabilities: AgentCapabilities {
-                supports_chess960: true,
+                supported_variants: vec![Variant::Standard, Variant::Chess960],
             },
             declared_name: Some("sample".to_string()),
             tags: vec!["test".to_string()],

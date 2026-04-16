@@ -155,7 +155,7 @@ declared_name = "PyTorch Eval"
 launcher = "command"
 command = "python"
 args = ["engines/python-ml/run.py", "--device=cpu"]
-supports_chess960 = true
+supported_variants = ["standard", "chess960"]
 tags = ["ml", "python"]
 notes = "Updated notes"
 
@@ -298,7 +298,7 @@ version_label = "v1"
 declared_name = "Material Plus"
 tags = ["starter", "baseline"]
 notes = "Bundled material plus starter."
-supports_chess960 = true
+supported_variants = ["standard", "chess960"]
 "#,
         )?;
         write_file(
@@ -332,7 +332,7 @@ version_label = "dev"
 declared_name = "Material Plus"
 tags = ["starter", "baseline"]
 notes = "Mutable development version."
-supports_chess960 = true
+supported_variants = ["standard", "chess960"]
 "#,
         )?;
         write_file(
@@ -356,7 +356,7 @@ declared_name = "PyTorch Eval"
 launcher = "command"
 command = "python"
 args = ["engines/python-ml/run.py"]
-supports_chess960 = true
+supported_variants = ["standard", "chess960"]
 tags = ["ml", "python"]
 notes = "Repo-local command engine"
 

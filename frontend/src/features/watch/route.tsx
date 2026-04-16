@@ -28,6 +28,7 @@ import { participantName } from "../../shared/lib/participants";
 import { useGamesQuery, useMatchesQuery, usePoolsQuery, useTournamentsQuery } from "../../shared/queries/arena";
 import { BoardView, EmptyState, EngineSideCard, MoveList, StatCard, StatusBadge } from "../../shared/ui";
 import { DebugDrawer } from "../debug/DebugDrawer";
+import { useReplayQuery } from "../replay/api";
 import { useConfirmedLiveMatch } from "./live";
 import { useLivePlayback } from "./livePlayback";
 import { isPendingLiveWatchMatch, isTerminalLiveStatus, lastWatchedKey, liveClockElapsedMs } from "./model";
@@ -56,17 +57,19 @@ export function WatchPage() {
         (games.data ?? []).find((game) => game.match_id === selectedLiveMatch.id) ??
         null
       : null;
-  const selectedWatchReplay = selectedWatchGame
+  const watchReplayQuery = useReplayQuery(selectedWatchGame?.id ?? "");
+  const selectedWatchReplay = watchReplayQuery.data ?? (selectedWatchGame
     ? {
         id: selectedWatchGame.id,
         variant: selectedWatchGame.variant,
         start_fen: selectedWatchGame.start_fen,
+        frames: [],
         pgn: selectedWatchGame.pgn,
         moves_uci: selectedWatchGame.moves_uci,
         result: selectedWatchGame.result,
         termination: selectedWatchGame.termination
       }
-    : null;
+    : null);
 
   const shouldKeepConfirmedLiveMatch =
     !!selectedLiveMatch &&
@@ -85,7 +88,7 @@ export function WatchPage() {
           tournament_id: selectedLiveMatch.tournament_id,
           pool_id: selectedLiveMatch.pool_id,
           variant: liveVariant,
-          start_fen: confirmedLiveSnapshot.fen,
+          start_fen: confirmedLiveSnapshot.start_fen,
           current_fen: confirmedLiveSnapshot.fen,
           moves_uci: confirmedLiveSnapshot.moves,
           white_time_left_ms: confirmedLiveSnapshot.white_remaining_ms,
@@ -255,9 +258,16 @@ export function WatchPage() {
   const interactiveLive = rawLiveGame?.interactive ?? selectedLiveMatch?.interactive ?? false;
   const liveBoardOrientation = interactiveLive && liveBlackParticipant?.kind === "human_player" ? "black" : "white";
   const orientedLiveBoardSquares = orientSquares(liveBoardSquares, liveBoardOrientation);
-  const legalMovesForCurrentPosition = rawLiveGame ? legalMovesByOrigin(rawLiveGame.current_fen) : new Map<string, BoardMoveMarker[]>();
+  const standardMoveHints = liveVariant === "standard";
+  const legalMovesForCurrentPosition =
+    rawLiveGame && standardMoveHints ? legalMovesByOrigin(rawLiveGame.current_fen) : new Map<string, BoardMoveMarker[]>();
   const selectedSquareMarkers = selectedBoardSquare ? legalMovesForCurrentPosition.get(selectedBoardSquare) ?? [] : [];
-  const selectableSquares = interactiveLive && rawLiveGame?.human_turn ? new Set(legalMovesForCurrentPosition.keys()) : new Set<string>();
+  const selectableSquares =
+    interactiveLive && rawLiveGame?.human_turn
+      ? standardMoveHints
+        ? new Set(legalMovesForCurrentPosition.keys())
+        : selectableHumanPieceSquares(liveBoardSquares, liveSideToMove)
+      : new Set<string>();
   const selectedLiveTournament = selectedLiveMatch ? tournamentById[selectedLiveMatch.tournament_id] : undefined;
   const pendingSelectedLiveMatch = selectedLiveMatch !== null && isPendingLiveWatchMatch(selectedLiveMatch);
   const pendingLiveMatch =
@@ -354,7 +364,7 @@ export function WatchPage() {
       return;
     }
     const legalDestination = selectedSquareMarkers.find((marker) => marker.square === square);
-    if (!legalDestination) {
+    if (!legalDestination && standardMoveHints) {
       setInvalidBoardSquare(square);
       return;
     }
@@ -456,7 +466,7 @@ export function WatchPage() {
                 </section>
               ) : null}
 
-              {selectedWatchReplay.variant === "standard" && watchReplaySquares.length > 0 ? (
+              {watchReplaySquares.length > 0 ? (
                 <div
                   className={`watch-board-wrap ${
                     replayWinnerSide ? `watch-board-wrap-winner-${replayWinnerSide}` : selectedWatchReplay.result === "draw" ? "watch-board-wrap-draw" : ""
@@ -465,10 +475,7 @@ export function WatchPage() {
                   <BoardView squares={watchReplaySquares} />
                 </div>
               ) : (
-                <EmptyState>
-                  Board replay is available for standard games. Chess960 replays still include the move list and
-                  result details.
-                </EmptyState>
+                <EmptyState>Board replay is unavailable for this game.</EmptyState>
               )}
 
               <div className="watch-controls">
@@ -597,7 +604,7 @@ export function WatchPage() {
                 </section>
               ) : null}
 
-              {rawLiveGame.variant === "standard" && liveBoardSquares.length > 0 ? (
+              {liveBoardSquares.length > 0 ? (
                 <div
                   className={`watch-board-wrap ${boardEventFlash ? "watch-board-wrap-flash" : ""} ${
                     visibleWinnerSide
@@ -619,9 +626,7 @@ export function WatchPage() {
                   />
                 </div>
               ) : (
-                <EmptyState>
-                  Live board display is available for standard games. Chess960 still updates the move list and clocks.
-                </EmptyState>
+                <EmptyState>Live board display is unavailable for this game.</EmptyState>
               )}
 
               <div className="watch-controls">
@@ -730,4 +735,20 @@ function urgencyForClock(ms: number, active: boolean) {
     return "warning" as const;
   }
   return "normal" as const;
+}
+
+function selectableHumanPieceSquares(squares: string[], sideToMove: string) {
+  if (sideToMove !== "white" && sideToMove !== "black") {
+    return new Set<string>();
+  }
+  const wantsWhite = sideToMove === "white";
+  return new Set(
+    squares.flatMap((piece, index) => {
+      if (!piece) {
+        return [];
+      }
+      const isWhitePiece = piece === piece.toUpperCase();
+      return isWhitePiece === wantsWhite ? [squareName(index)] : [];
+    })
+  );
 }

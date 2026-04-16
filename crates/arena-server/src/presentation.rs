@@ -100,6 +100,7 @@ pub(crate) struct ReplayPayload {
     pub(crate) id: Uuid,
     pub(crate) variant: Variant,
     pub(crate) start_fen: String,
+    pub(crate) frames: Vec<String>,
     pub(crate) pgn: String,
     pub(crate) moves_uci: Vec<String>,
     pub(crate) result: GameResult,

@@ -3,8 +3,8 @@ mod match_runner;
 mod uci;
 
 pub use game_logic::{
-    calculate_move_budget, classify_position, classify_terminal_board, insufficient_material,
-    pgn_from_moves, starting_board,
+    calculate_move_budget, classify_position, classify_terminal_board, fen_for_variant,
+    insufficient_material, pgn_from_moves, starting_board,
 };
 pub use match_runner::{
     AgentAdapter, MatchBundleRequest, MatchPairRequest, MatchRequest, build_adapter,

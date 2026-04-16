@@ -1,0 +1,9 @@
+registry_key = "chess960-blitz-3-2"
+name = "Chess960 Blitz 3+2"
+description = "Chess960, 3 minutes with 2-second increment, paired colors."
+variant = "chess960"
+initial_ms = 180000
+increment_ms = 2000
+paired_games = true
+swap_colors = true
+active = true

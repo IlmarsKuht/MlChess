@@ -101,9 +101,28 @@ pub struct TimeControl {
     pub increment_ms: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentCapabilities {
-    pub supports_chess960: bool,
+    #[serde(default = "default_supported_variants")]
+    pub supported_variants: Vec<Variant>,
+}
+
+impl AgentCapabilities {
+    pub fn supports_variant(&self, variant: Variant) -> bool {
+        self.supported_variants.contains(&variant)
+    }
+}
+
+impl Default for AgentCapabilities {
+    fn default() -> Self {
+        Self {
+            supported_variants: default_supported_variants(),
+        }
+    }
+}
+
+fn default_supported_variants() -> Vec<Variant> {
+    vec![Variant::Standard, Variant::Chess960]
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -448,6 +467,7 @@ pub struct LiveMatchSnapshot {
     pub status: LiveStatus,
     pub result: LiveResult,
     pub termination: LiveTermination,
+    pub start_fen: String,
     pub fen: String,
     pub moves: Vec<String>,
     pub white_remaining_ms: u64,
@@ -465,6 +485,7 @@ pub struct MoveCommittedEvent {
     pub server_now_unix_ms: i64,
     pub status: LiveStatus,
     pub move_uci: String,
+    pub start_fen: String,
     pub fen: String,
     pub moves: Vec<String>,
     pub white_remaining_ms: u64,
@@ -497,6 +518,7 @@ pub struct GameFinishedEvent {
     pub status: LiveStatus,
     pub result: LiveResult,
     pub termination: LiveTermination,
+    pub start_fen: String,
     pub fen: String,
     pub moves: Vec<String>,
     pub white_remaining_ms: u64,
@@ -521,6 +543,7 @@ pub struct LiveRuntimeCheckpoint {
     pub status: LiveStatus,
     pub result: LiveResult,
     pub termination: LiveTermination,
+    pub start_fen: String,
     pub fen: String,
     pub moves: Vec<String>,
     pub white_remaining_ms: u64,

@@ -225,6 +225,7 @@ pub(crate) fn snapshot_from_checkpoint(checkpoint: &LiveRuntimeCheckpoint) -> Li
         status: checkpoint.status,
         result: checkpoint.result,
         termination: checkpoint.termination,
+        start_fen: checkpoint.start_fen.clone(),
         fen: checkpoint.fen.clone(),
         moves: checkpoint.moves.clone(),
         white_remaining_ms: checkpoint.white_remaining_ms,
@@ -245,6 +246,7 @@ pub(crate) fn move_committed_from_checkpoint(
         server_now_unix_ms: checkpoint.updated_at.timestamp_millis(),
         status: checkpoint.status,
         move_uci: checkpoint.moves.last().cloned().unwrap_or_default(),
+        start_fen: checkpoint.start_fen.clone(),
         fen: checkpoint.fen.clone(),
         moves: checkpoint.moves.clone(),
         white_remaining_ms: checkpoint.white_remaining_ms,
@@ -281,6 +283,7 @@ pub(crate) fn game_finished_from_checkpoint(
         status: checkpoint.status,
         result: checkpoint.result,
         termination: checkpoint.termination,
+        start_fen: checkpoint.start_fen.clone(),
         fen: checkpoint.fen.clone(),
         moves: checkpoint.moves.clone(),
         white_remaining_ms: checkpoint.white_remaining_ms,
@@ -370,6 +373,7 @@ mod tests {
             } else {
                 LiveTermination::None
             },
+            start_fen: "4k3/8/8/8/8/8/8/4K3 w - - 0 1".to_string(),
             fen: if moves.is_empty() {
                 "4k3/8/8/8/8/8/8/4K3 w - - 0 1".to_string()
             } else {
@@ -519,6 +523,7 @@ mod tests {
                 status: LiveStatus::Running,
                 result: LiveResult::None,
                 termination: LiveTermination::None,
+                start_fen: "4k3/8/8/8/8/8/8/4K3 w - - 0 1".to_string(),
                 fen: if moves.is_empty() {
                     "4k3/8/8/8/8/8/8/4K3 w - - 0 1".to_string()
                 } else {

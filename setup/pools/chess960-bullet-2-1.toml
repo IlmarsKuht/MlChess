@@ -1,0 +1,9 @@
+registry_key = "chess960-bullet-2-1"
+name = "Chess960 Bullet 2+1"
+description = "Chess960, 2 minutes with 1-second increment, paired colors."
+variant = "chess960"
+initial_ms = 120000
+increment_ms = 1000
+paired_games = true
+swap_colors = true
+active = true

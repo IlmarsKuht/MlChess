@@ -28,6 +28,9 @@ export function buildReplayFrames(replay: ReplayPayload | null) {
   if (!replay) {
     return [];
   }
+  if (replay.frames.length > 0) {
+    return replay.frames;
+  }
   return buildFrames(replay.variant, replay.start_fen, replay.moves_uci);
 }
 
