@@ -217,4 +217,27 @@ mod tests {
             vec!["qnnrkrbb/pppppppp/8/8/8/8/PPPPPPPP/QNNRKRBB w FDfd - 0 1"]
         );
     }
+
+    #[test]
+    fn replay_accepts_chess960_king_captures_rook_castling() {
+        let moves = [
+            "d1e3", "e8f6", "e1f3", "d8e6", "c2c3", "f8e8", "b1f5", "d7d6",
+            "f1e1", "g7g6", "f5c2", "c8d7", "c2b3", "e6c5", "b3c4", "d7c6",
+            "a1b1", "c6e4", "e3c2", "d6d5", "c4b5", "c7c6", "d2d4", "c5e6",
+            "b5d3", "e4d3", "e2d3", "b8d6", "c1h6", "a8d8", "b1c1", "d8a5",
+            "c1b1", "a5a6", "c2e3", "e8d8", "e1e2", "d8e8", "g1h1",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect::<Vec<_>>();
+
+        let frames = build_replay_frames(
+            Variant::Chess960,
+            "qbbnnrkr/pppppppp/8/8/8/8/PPPPPPPP/QBBNNRKR w HFhf - 0 1",
+            &moves,
+        )
+        .unwrap();
+
+        assert_eq!(frames.len(), moves.len() + 1);
+    }
 }

@@ -137,7 +137,7 @@ pub fn run_uci_loop<E: UciEngine>(engine: &mut E) -> Result<()> {
                 bail!("engine selected illegal move: {:?}", mv);
             }
 
-            writeln!(stdout, "bestmove {}", util::display_uci_move(&board, mv))?;
+            writeln!(stdout, "bestmove {}", format_uci_move(&board, mv, variant))?;
             stdout.flush()?;
             continue;
         }
@@ -194,4 +194,41 @@ fn parse_position_command(command: &str, variant: Variant) -> Result<(Board, Vec
     }
 
     Ok((board, history_hashes))
+}
+
+fn format_uci_move(board: &Board, mv: Move, variant: Variant) -> String {
+    if variant.is_chess960() {
+        mv.to_string()
+    } else {
+        util::display_uci_move(board, mv).to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn standard_castling_uses_standard_uci_king_destination() {
+        let board: Board = "rnbqkb1r/ppp2ppp/4pn2/3p4/8/5NP1/PPPPPPBP/RNBQK2R w KQkq - 0 4"
+            .parse()
+            .unwrap();
+        let castle: Move = "e1h1".parse().unwrap();
+
+        assert_eq!(format_uci_move(&board, castle, Variant::Standard), "e1g1");
+    }
+
+    #[test]
+    fn chess960_castling_uses_king_captures_rook_notation() {
+        let (board, _) = parse_position_command(
+            "fen qbbnnrkr/pppppppp/8/8/8/8/PPPPPPPP/QBBNNRKR w HFhf - 0 1 moves d1e3 e8f6 e1f3 d8e6 c2c3 f8e8 b1f5 d7d6 f1e1 g7g6 f5c2 c8d7 c2b3 e6c5 b3c4 d7c6 a1b1 c6e4 e3c2 d6d5 c4b5 c7c6 d2d4 c5e6 b5d3 e4d3 e2d3 b8d6 c1h6 a8d8 b1c1 d8a5 c1b1 a5a6 c2e3 e8d8 e1e2 d8e8",
+            Variant::Chess960,
+        )
+        .unwrap();
+        let castle: Move = "g1h1".parse().unwrap();
+
+        assert!(board.is_legal(castle));
+        assert_eq!(util::display_uci_move(&board, castle).to_string(), "g1g1");
+        assert_eq!(format_uci_move(&board, castle, Variant::Chess960), "g1h1");
+    }
 }

@@ -498,6 +498,7 @@ textarea {
   border-radius: 20px;
   border: 1px solid rgba(19, 32, 50, 0.08);
   background: var(--panel-strong);
+  color: var(--ink);
 }
 
 .table-row {
