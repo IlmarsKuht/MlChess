@@ -12,7 +12,7 @@ import type {
   LeaderboardEntry,
   MatchSeries,
   Tournament
-} from "../../app/types";
+} from "../api/types";
 
 export const arenaQueryKeys = {
   agents: ["agents"] as const,

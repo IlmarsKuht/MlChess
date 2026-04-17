@@ -1,5 +1,5 @@
-import { pieceImages } from "../../app/pieces";
-import type { BoardMoveMarker } from "../../app/types";
+import { pieceImages } from "../chess/pieces";
+import type { BoardMoveMarker } from "../api/types";
 import { boardIndexToSquare } from "../chess/board";
 
 export function BoardView({

@@ -1,10 +1,3 @@
-import {
-  createRequestId,
-  currentRoute,
-  recordApiDebugFinish,
-  recordApiDebugStart
-} from "../../app/debug";
-
 const apiBase = import.meta.env.VITE_API_BASE ?? "/api";
 
 export function apiUrl(path: string) {
@@ -22,51 +15,82 @@ export function wsUrl(path: string) {
   return base.toString();
 }
 
-export interface DebugRequestInit extends RequestInit {
+export interface ApiRequestDebug {
+  clientActionId?: string;
+}
+
+export interface ApiRequestInit extends RequestInit {
   debug?: {
     clientActionId?: string;
   };
 }
 
-export async function fetchJson<T>(path: string, init?: DebugRequestInit): Promise<T> {
-  const requestId = createRequestId();
-  const startedAt = new Date().toISOString();
+export interface ApiClientHooks {
+  beforeRequest?: (request: {
+    path: string;
+    method: string;
+    debug?: ApiRequestDebug;
+  }) => {
+    headers?: Record<string, string>;
+    requestId?: string;
+    startedAt?: string;
+  } | void;
+  afterResponse?: (result: {
+    requestId?: string;
+    startedAt?: string;
+    completedAt: string;
+    durationMs: number;
+    statusCode: number;
+    ok: boolean;
+    responseRequestId?: string;
+  }) => void;
+  afterError?: (result: { requestId?: string; error: string }) => void;
+}
+
+export function createApiClient(hooks: ApiClientHooks = {}) {
+  return {
+    fetchJson<T>(path: string, init?: ApiRequestInit) {
+      return fetchJson<T>(path, init, hooks);
+    }
+  };
+}
+
+export async function fetchJson<T>(path: string, init?: ApiRequestInit, hooks: ApiClientHooks = {}): Promise<T> {
+  const startedAtFallback = new Date().toISOString();
   const startedMs = Date.now();
   const { debug, headers, method, ...rest } = init ?? {};
   const finalMethod = method ?? "GET";
-  recordApiDebugStart({
-    request_id: requestId,
-    client_action_id: debug?.clientActionId,
-    method: finalMethod,
+  const hookContext = hooks.beforeRequest?.({
     path,
-    route: currentRoute(),
-    started_at: startedAt
+    method: finalMethod,
+    debug
   });
+  const requestId = hookContext?.requestId;
+  const startedAt = hookContext?.startedAt ?? startedAtFallback;
   const response = await fetch(apiUrl(path), {
     headers: {
       "Content-Type": "application/json",
-      "x-request-id": requestId,
-      "x-client-route": currentRoute(),
-      "x-client-ts": startedAt,
-      ...(debug?.clientActionId ? { "x-client-action-id": debug.clientActionId } : {}),
+      ...(hookContext?.headers ?? {}),
       ...(headers ?? {})
     },
     method: finalMethod,
     ...rest
   });
-  recordApiDebugFinish(requestId, {
-    completed_at: new Date().toISOString(),
-    duration_ms: Date.now() - startedMs,
-    status_code: response.status,
+  const completedAt = new Date().toISOString();
+  hooks.afterResponse?.({
+    requestId,
+    startedAt,
+    completedAt,
+    durationMs: Date.now() - startedMs,
+    statusCode: response.status,
     ok: response.ok,
-    response_request_id: response.headers.get("x-request-id") ?? undefined
+    responseRequestId: response.headers.get("x-request-id") ?? undefined
   });
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: "Request failed" }));
-    recordApiDebugFinish(requestId, {
-      error: error.error ?? "Request failed"
-    });
-    throw new Error(error.error ?? "Request failed");
+    const message = error.error ?? "Request failed";
+    hooks.afterError?.({ requestId, error: message });
+    throw new Error(message);
   }
   return response.json();
 }

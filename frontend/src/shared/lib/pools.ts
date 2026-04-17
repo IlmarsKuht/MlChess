@@ -1,4 +1,4 @@
-import type { BenchmarkPool, TimeControl, Variant } from "../../app/types";
+import type { BenchmarkPool, TimeControl, Variant } from "../api/types";
 
 export function timeControlKey(timeControl: TimeControl) {
   return `${timeControl.initial_ms}:${timeControl.increment_ms}`;

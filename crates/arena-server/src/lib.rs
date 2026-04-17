@@ -1,4 +1,7 @@
+// Legacy transition module. Do not add new behavior here. Move code into feature/bootstrap/storage/state submodules instead.
 mod api;
+mod bootstrap;
+mod debug;
 mod db;
 mod gameplay;
 mod human_games;
@@ -14,36 +17,13 @@ mod state;
 mod storage;
 mod tournaments;
 
-use std::path::PathBuf;
-
-use anyhow::{Context, Result};
-use arena_core::{LiveResult, LiveStatus, LiveTermination, ProtocolLiveSide};
 use axum::{
-    Json, Router,
-    body::{Body, to_bytes},
-    extract::{MatchedPath, Request},
-    http::{HeaderName, HeaderValue, StatusCode},
-    middleware::{self, Next},
+    Json,
+    http::StatusCode,
     response::{IntoResponse, Response},
-    routing::get,
 };
-use chrono::Utc;
-use db::init_db;
-use human_games::service::restore_human_game;
-use live::LiveMatchStore;
-use presentation::{resolve_match_lifecycle, resolve_tournament_status};
-use registry::{SetupRegistryCache, sync_setup_registry_if_changed};
-use serde_json::{Value, json};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use state::{
-    AppState, HumanGameStore, LiveMetricsStore, RequestContext, RequestJournalEntry,
-    TournamentCoordinator,
-};
-use tournaments::service::restore_engine_game;
-use tower::ServiceBuilder;
-use tower_http::{cors::CorsLayer, services::ServeDir};
-use tracing::{error, info, warn};
-use uuid::Uuid;
+use serde_json::json;
+use tracing::error;
 
 #[derive(Debug, thiserror::Error)]
 enum ApiError {
@@ -82,458 +62,36 @@ impl From<sqlx::Error> for ApiError {
     }
 }
 
-pub async fn run_server(
-    db_url: &str,
-    bind_addr: &str,
-    frontend_dist: Option<PathBuf>,
-) -> Result<()> {
-    let db_options = db_url
-        .parse::<SqliteConnectOptions>()
-        .with_context(|| format!("failed to parse sqlite connection string {db_url}"))?
-        .create_if_missing(true)
-        .foreign_keys(true);
-    let db = SqlitePoolOptions::new()
-        .max_connections(5)
-        .connect_with(db_options)
-        .await
-        .with_context(|| format!("failed to connect to {db_url}"))?;
-    sqlx::query("PRAGMA foreign_keys = ON").execute(&db).await?;
-    init_db(&db).await?;
-    let setup_registry = SetupRegistryCache::default();
-    sync_setup_registry_if_changed(&db, &setup_registry).await?;
+pub use bootstrap::reconciliation::cleanup_stale_match_statuses;
+pub use bootstrap::server::run_server;
+#[cfg(test)]
+pub(crate) use db::init_db;
+#[cfg(test)]
+pub(crate) use bootstrap::server::build_app;
+pub(crate) use bootstrap::server::workspace_root;
+#[cfg(test)]
+pub(crate) use bootstrap::restore::restore_live_runtime;
 
-    let state = AppState {
-        db,
-        coordinator: TournamentCoordinator::default(),
-        live_matches: LiveMatchStore::default(),
-        live_metrics: LiveMetricsStore::default(),
-        human_games: HumanGameStore::default(),
-        debug_reports_dir: std::env::current_dir()?.join("debug-reports"),
-        frontend_dist: frontend_dist.clone(),
-        setup_registry,
-    };
-    restore_live_runtime(&state).await?;
-    let reconciled = reconcile_history_statuses(&state.db).await?;
-    if reconciled > 0 {
-        info!(
-            updated_rows = reconciled,
-            "reconciled stale tournament history rows"
-        );
-    }
-    let app = build_app(state);
-    let listener = tokio::net::TcpListener::bind(bind_addr).await?;
-    info!("arena server listening on http://{bind_addr}");
-    axum::serve(listener, app).await?;
-    Ok(())
-}
-
-pub async fn cleanup_stale_match_statuses(db_url: &str) -> Result<u64> {
-    let db_options = db_url
-        .parse::<SqliteConnectOptions>()
-        .with_context(|| format!("failed to parse sqlite connection string {db_url}"))?
-        .create_if_missing(true)
-        .foreign_keys(true);
-    let db = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(db_options)
-        .await
-        .with_context(|| format!("failed to connect to {db_url}"))?;
-    sqlx::query("PRAGMA foreign_keys = ON").execute(&db).await?;
-    init_db(&db).await?;
-    reconcile_history_statuses(&db).await
-}
-
-async fn reconcile_history_statuses(db: &sqlx::SqlitePool) -> Result<u64> {
-    let tournaments = crate::storage::list_tournaments(db).await?;
-    let match_series = crate::storage::list_match_series(db, None).await?;
-    let games = crate::storage::list_games(db, None, None).await?;
-    let checkpoints = crate::storage::list_live_runtime_checkpoints(db, None).await?;
-    let game_by_match_id = games
-        .into_iter()
-        .map(|game| (game.match_id, game))
-        .collect::<std::collections::HashMap<_, _>>();
-    let checkpoint_by_match_id = checkpoints
-        .into_iter()
-        .map(|checkpoint| (checkpoint.match_id, checkpoint))
-        .collect::<std::collections::HashMap<_, _>>();
-    let tournament_by_id = tournaments
-        .iter()
-        .map(|tournament| (tournament.id, tournament))
-        .collect::<std::collections::HashMap<_, _>>();
-    let now = Utc::now();
-    let stale_cutoff = now - chrono::Duration::seconds(30);
-    let mut updated = 0_u64;
-    let mut match_statuses_by_tournament_id: std::collections::HashMap<
-        Uuid,
-        Vec<arena_core::MatchStatus>,
-    > = std::collections::HashMap::new();
-    let mut tournament_completed_at: std::collections::HashMap<Uuid, chrono::DateTime<Utc>> =
-        std::collections::HashMap::new();
-
-    for series in match_series {
-        let tournament = match tournament_by_id.get(&series.tournament_id) {
-            Some(value) => *value,
-            None => continue,
-        };
-        let game = game_by_match_id.get(&series.id);
-        let checkpoint = checkpoint_by_match_id.get(&series.id);
-        let (mut resolved_status, _, _) = resolve_match_lifecycle(
-            &series,
-            tournament.status,
-            game.map(|value| value.id),
-            checkpoint,
-        );
-        if game.is_none()
-            && checkpoint.is_none()
-            && series.created_at <= stale_cutoff
-            && tournament.status != arena_core::TournamentStatus::Draft
-        {
-            resolved_status = match series.status {
-                arena_core::MatchStatus::Pending => arena_core::MatchStatus::Skipped,
-                arena_core::MatchStatus::Running => arena_core::MatchStatus::Failed,
-                status => status,
-            };
-        }
-
-        if resolved_status != series.status {
-            crate::storage::update_match_series_status(db, series.id, resolved_status).await?;
-            updated += 1;
-        }
-        match_statuses_by_tournament_id
-            .entry(series.tournament_id)
-            .or_default()
-            .push(resolved_status);
-        if let Some(completed_at) = game.map(|value| value.completed_at).or_else(|| {
-            checkpoint.and_then(|value| {
-                (value.status != arena_core::LiveStatus::Running).then_some(value.updated_at)
-            })
-        }) {
-            tournament_completed_at
-                .entry(series.tournament_id)
-                .and_modify(|existing| {
-                    if completed_at > *existing {
-                        *existing = completed_at;
-                    }
-                })
-                .or_insert(completed_at);
-        }
-    }
-
-    for tournament in tournaments {
-        let empty = Vec::new();
-        let match_statuses = match_statuses_by_tournament_id
-            .get(&tournament.id)
-            .unwrap_or(&empty);
-        let resolved_status = resolve_tournament_status(&tournament, match_statuses, now);
-        if resolved_status == tournament.status {
-            continue;
-        }
-        let completed_at = if matches!(
-            resolved_status,
-            arena_core::TournamentStatus::Completed
-                | arena_core::TournamentStatus::Failed
-                | arena_core::TournamentStatus::Stopped
-        ) {
-            Some(
-                tournament
-                    .completed_at
-                    .or_else(|| tournament_completed_at.get(&tournament.id).copied())
-                    .unwrap_or(now),
-            )
-        } else {
-            tournament.completed_at
-        };
-        crate::storage::update_tournament_status(
-            db,
-            tournament.id,
-            resolved_status,
-            tournament.started_at,
-            completed_at,
-        )
-        .await?;
-        updated += 1;
-    }
-
-    Ok(updated)
-}
-
-pub fn build_app(state: AppState) -> Router {
-    let api = api::router().layer(middleware::from_fn_with_state(
-        state.clone(),
-        request_context_middleware,
-    ));
-    let mut app = Router::new()
-        .nest("/api", api)
-        .layer(ServiceBuilder::new().layer(CorsLayer::permissive()))
-        .with_state(state.clone());
-
-    if let Some(frontend_dist) = &state.frontend_dist {
-        app = app.fallback_service(ServeDir::new(frontend_dist));
-    } else {
-        app = app.route("/", get(root_message));
-    }
-
-    app
-}
-
-async fn request_context_middleware(
-    axum::extract::State(state): axum::extract::State<AppState>,
-    mut request: Request,
-    next: Next,
-) -> Response {
-    let started_at = chrono::Utc::now();
-    let method = request.method().as_str().to_string();
-    let matched_path = request
-        .extensions()
-        .get::<MatchedPath>()
-        .map(MatchedPath::as_str)
-        .unwrap_or_else(|| request.uri().path())
-        .to_string();
-    let request_id =
-        request_header_uuid(request.headers(), "x-request-id").unwrap_or_else(Uuid::new_v4);
-    let context = RequestContext {
-        request_id,
-        client_action_id: request_header_uuid(request.headers(), "x-client-action-id"),
-        client_route: request
-            .headers()
-            .get("x-client-route")
-            .and_then(|value| value.to_str().ok())
-            .map(ToOwned::to_owned),
-        client_ts: request
-            .headers()
-            .get("x-client-ts")
-            .and_then(|value| value.to_str().ok())
-            .map(ToOwned::to_owned),
-        method: method.clone(),
-        route: matched_path.clone(),
-    };
-    request.extensions_mut().insert(context.clone());
-    let (match_id, tournament_id, game_id) = infer_entity_ids(request.uri().path());
-
-    let mut response = next.run(request).await;
-    response.headers_mut().insert(
-        HeaderName::from_static("x-request-id"),
-        HeaderValue::from_str(&request_id.to_string())
-            .unwrap_or_else(|_| HeaderValue::from_static("invalid-request-id")),
-    );
-    response = enrich_error_response(response, request_id).await;
-
-    let completed_at = chrono::Utc::now();
-    let status_code = response.status().as_u16();
-    let error_text = response.extensions().get::<String>().cloned().or_else(|| {
-        (status_code >= 400).then(|| format!("request failed with status {status_code}"))
-    });
-    let duration_ms = (completed_at - started_at).num_milliseconds();
-
-    let journal = RequestJournalEntry {
-        request_id,
-        client_action_id: context.client_action_id,
-        client_route: context.client_route.clone(),
-        client_ts: context.client_ts.clone(),
-        method,
-        route: matched_path,
-        status_code,
-        match_id,
-        tournament_id,
-        game_id,
-        started_at,
-        completed_at,
-        duration_ms,
-        error_text,
-    };
-    if let Err(err) = crate::storage::insert_request_journal_entry(&state.db, &journal).await {
-        warn!(request_id = %request_id, "failed to persist request journal entry: {err:#}");
-    }
-    info!(
-        request_id = %request_id,
-        client_action_id = ?context.client_action_id,
-        client_route = ?context.client_route,
-        status_code,
-        route = %journal.route,
-        match_id = ?journal.match_id,
-        tournament_id = ?journal.tournament_id,
-        game_id = ?journal.game_id,
-        "handled api request"
-    );
-    response
-}
-
-async fn enrich_error_response(response: Response, request_id: Uuid) -> Response {
-    if response.status().is_success() {
-        return response;
-    }
-    let (parts, body) = response.into_parts();
-    let bytes = match to_bytes(body, usize::MAX).await {
-        Ok(bytes) => bytes,
-        Err(_) => return Response::from_parts(parts, Body::empty()),
-    };
-    let mut payload = serde_json::from_slice::<Value>(&bytes)
-        .unwrap_or_else(|_| json!({ "error": "request failed" }));
-    if payload.get("request_id").is_none() {
-        payload["request_id"] = json!(request_id);
-    }
-    let mut rebuilt = Response::from_parts(parts, Body::from(payload.to_string()));
-    rebuilt.headers_mut().insert(
-        HeaderName::from_static("content-type"),
-        HeaderValue::from_static("application/json"),
-    );
-    if let Some(error_text) = payload.get("error").and_then(Value::as_str) {
-        rebuilt.extensions_mut().insert(error_text.to_string());
-    }
-    rebuilt
-}
-
-fn request_header_uuid(headers: &axum::http::HeaderMap, name: &'static str) -> Option<Uuid> {
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| Uuid::parse_str(value).ok())
-}
-
-fn infer_entity_ids(path: &str) -> (Option<Uuid>, Option<Uuid>, Option<Uuid>) {
-    let segments: Vec<_> = path.trim_matches('/').split('/').collect();
-    let mut match_id = None;
-    let mut tournament_id = None;
-    let mut game_id = None;
-    for window in segments.windows(2) {
-        let Some(id) = Uuid::parse_str(window[1]).ok() else {
-            continue;
-        };
-        match window[0] {
-            "matches" => match_id = Some(id),
-            "tournaments" => tournament_id = Some(id),
-            "games" => game_id = Some(id),
-            _ => {}
-        }
-    }
-    (match_id, tournament_id, game_id)
-}
-
-async fn restore_live_runtime(state: &AppState) -> Result<()> {
-    let checkpoints =
-        crate::storage::list_live_runtime_checkpoints(&state.db, Some(LiveStatus::Running)).await?;
-    let human_player = crate::storage::ensure_human_player(&state.db).await?;
-    state.live_metrics.restored_matches.store(
-        checkpoints.len() as u64,
-        std::sync::atomic::Ordering::Relaxed,
-    );
-    info!(
-        restored_matches = checkpoints.len(),
-        "restoring live runtime checkpoints"
-    );
-    for checkpoint in checkpoints {
-        let match_series =
-            match crate::storage::get_match_series(&state.db, checkpoint.match_id).await {
-                Ok(value) => value,
-                Err(err) => {
-                    error!(
-                        "failed to load match series for restored live match {}: {err}",
-                        checkpoint.match_id
-                    );
-                    continue;
-                }
-            };
-        state
-            .live_matches
-            .bootstrap_from_db(&state.db, checkpoint.match_id)
-            .await?;
-        if match_series.white_version_id == human_player.id
-            || match_series.black_version_id == human_player.id
-        {
-            if let Err(err) = restore_human_game(state, checkpoint.clone()).await {
-                error!(
-                    "failed to restore human live match {}: {err}",
-                    checkpoint.match_id
-                );
-                fail_closed_live_match(state, &match_series, checkpoint.clone()).await?;
-            }
-        } else {
-            if let Err(err) = restore_engine_game(state, checkpoint.clone()).await {
-                error!(
-                    "failed to restore engine live match {}: {err}",
-                    checkpoint.match_id
-                );
-                fail_closed_live_match(state, &match_series, checkpoint.clone()).await?;
-            }
-        }
-    }
-    Ok(())
-}
-
-async fn fail_closed_live_match(
-    state: &AppState,
-    match_series: &arena_core::MatchSeries,
-    mut checkpoint: arena_core::LiveRuntimeCheckpoint,
-) -> Result<()> {
-    checkpoint.seq = checkpoint.seq.saturating_add(1);
-    checkpoint.status = LiveStatus::Aborted;
-    checkpoint.result = LiveResult::None;
-    checkpoint.termination = LiveTermination::Abort;
-    checkpoint.side_to_move = ProtocolLiveSide::None;
-    checkpoint.updated_at = chrono::Utc::now();
-    let event = arena_core::LiveEventEnvelope::GameFinished(live::game_finished_from_checkpoint(
-        &checkpoint,
-    ));
-    let mut tx = state.db.begin().await?;
-    crate::storage::upsert_live_runtime_checkpoint_tx(&mut tx, &checkpoint).await?;
-    crate::storage::insert_live_runtime_event_tx(&mut tx, &event).await?;
-    crate::storage::update_match_series_status_tx(
-        &mut tx,
-        match_series.id,
-        arena_core::MatchStatus::Failed,
-    )
-    .await?;
-    crate::storage::update_tournament_status_tx(
-        &mut tx,
-        match_series.tournament_id,
-        arena_core::TournamentStatus::Failed,
-        None,
-        Some(chrono::Utc::now()),
-    )
-    .await?;
-    tx.commit().await?;
-    live::publish_transient_with_metrics(
-        &state.live_matches,
-        Some(&state.live_metrics),
-        checkpoint,
-        event,
-    )
-    .await;
-    Ok(())
-}
-
-async fn root_message() -> Json<Value> {
-    Json(json!({
-        "name": "rust-chess-arena",
-        "message": "Frontend assets are not being served. Run the Vite app separately during development."
-    }))
-}
-
-fn workspace_root() -> PathBuf {
-    if let Ok(path) = std::env::var("ARENA_WORKSPACE_ROOT") {
-        return PathBuf::from(path);
-    }
-
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest_dir
-        .parent()
-        .and_then(|path| path.parent())
-        .map(|path| path.to_path_buf())
-        .unwrap_or(manifest_dir)
-}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        live::LiveMatchStore,
+        registry::{sync_setup_registry_if_changed, SetupRegistryCache},
+        state::{AppState, HumanGameStore, LiveMetricsStore, TournamentCoordinator},
+    };
     use crate::storage::{
         insert_game, insert_match_series, insert_tournament, list_agent_versions, list_agents,
         list_games, list_match_series, list_pools, list_tournaments, load_aggregate_leaderboard,
     };
     use arena_core::{
-        GameRecord, GameResult, GameTermination, MatchSeries, MatchStatus, Tournament,
+        GameRecord, GameResult, GameTermination, LiveStatus, MatchSeries, MatchStatus, Tournament,
         TournamentKind, TournamentStatus,
     };
+    use axum::Router;
     use axum::body::Body;
     use chrono::Utc;
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use tower::ServiceExt;
     use uuid::Uuid;
 

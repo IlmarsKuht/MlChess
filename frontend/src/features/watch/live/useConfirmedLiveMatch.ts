@@ -1,181 +1,24 @@
 import { useEffect, useRef, useState } from "react";
 
-import { createClientActionId, recordWsDebug, setUiDebugState } from "../../app/debug";
+import { createClientActionId, recordWsDebug, setUiDebugState } from "../../../app/debug";
+import { fetchJson, wsUrl } from "../../../app/api";
 import type {
-  GameTermination,
-  LiveErrorMessage,
-  LiveIntentAck,
   LiveMatchSnapshot,
   LiveProtocolEvent,
-  LiveResult,
-  LiveStatus,
   LiveSubmitMoveMessage,
   LiveWsClientMessage,
-  LiveWsServerMessage,
-  ProtocolLiveSide
-} from "../../app/types";
-import { fetchJson, wsUrl } from "../../app/api";
-
-export interface ConfirmedLiveFrame {
-  seq: number;
-  fen: string;
-  moves: string[];
-  move_uci: string | null;
-  white_time_left_ms: number;
-  black_time_left_ms: number;
-  side_to_move: ProtocolLiveSide;
-  status: LiveStatus;
-  result: LiveResult;
-  termination: GameTermination;
-  server_now_unix_ms: number;
-  turn_started_server_unix_ms: number;
-}
-
-interface ConfirmedLiveState {
-  snapshot: LiveMatchSnapshot | null;
-  timeline: ConfirmedLiveFrame[];
-}
+  LiveWsServerMessage
+} from "../../../shared/api/types";
+import {
+  type ConfirmedLiveState,
+  isErrorMessage,
+  isIntentAck,
+  isMissingLiveStateError,
+  isProtocolEvent
+} from "./protocol";
+import { isTerminalSnapshot, reduceEvent } from "./reducer";
 
 const transientMissingLiveStateRetryLimit = 5;
-
-type ReduceResult =
-  | { kind: "noop"; state: ConfirmedLiveState | null }
-  | { kind: "next"; state: ConfirmedLiveState }
-  | { kind: "gap" };
-
-function frameFromSnapshot(snapshot: LiveMatchSnapshot): ConfirmedLiveFrame {
-  return {
-    seq: snapshot.seq,
-    fen: snapshot.fen,
-    moves: snapshot.moves,
-    move_uci: snapshot.moves.at(-1) ?? null,
-    white_time_left_ms: snapshot.white_remaining_ms,
-    black_time_left_ms: snapshot.black_remaining_ms,
-    side_to_move: snapshot.side_to_move,
-    status: snapshot.status,
-    result: snapshot.result,
-    termination: snapshot.termination,
-    server_now_unix_ms: snapshot.server_now_unix_ms,
-    turn_started_server_unix_ms: snapshot.turn_started_server_unix_ms
-  };
-}
-
-function snapshotFromEvent(current: LiveMatchSnapshot, event: LiveProtocolEvent): LiveMatchSnapshot {
-  switch (event.event_type) {
-    case "snapshot":
-      return event;
-    case "move_committed":
-      return {
-        ...current,
-        event_type: "snapshot" as const,
-        seq: event.seq,
-        server_now_unix_ms: event.server_now_unix_ms,
-        status: event.status,
-        fen: event.fen,
-        moves: event.moves,
-        white_remaining_ms: event.white_remaining_ms,
-        black_remaining_ms: event.black_remaining_ms,
-        side_to_move: event.side_to_move,
-        turn_started_server_unix_ms: event.turn_started_server_unix_ms
-      };
-    case "clock_sync":
-      return {
-        ...current,
-        event_type: "snapshot" as const,
-        seq: event.seq,
-        server_now_unix_ms: event.server_now_unix_ms,
-        status: event.status,
-        white_remaining_ms: event.white_remaining_ms,
-        black_remaining_ms: event.black_remaining_ms,
-        side_to_move: event.side_to_move,
-        turn_started_server_unix_ms: event.turn_started_server_unix_ms
-      };
-    case "game_finished":
-      return {
-        ...current,
-        event_type: "snapshot" as const,
-        seq: event.seq,
-        server_now_unix_ms: event.server_now_unix_ms,
-        status: event.status,
-        result: event.result,
-        termination: event.termination,
-        fen: event.fen,
-        moves: event.moves,
-        white_remaining_ms: event.white_remaining_ms,
-        black_remaining_ms: event.black_remaining_ms,
-        side_to_move: event.side_to_move,
-        turn_started_server_unix_ms: event.turn_started_server_unix_ms
-      };
-  }
-}
-
-function isProtocolEvent(message: LiveWsServerMessage): message is LiveProtocolEvent {
-  return "event_type" in message;
-}
-
-function isIntentAck(message: LiveWsServerMessage): message is LiveIntentAck {
-  return "message_type" in message && message.message_type === "intent_ack";
-}
-
-function isErrorMessage(message: LiveWsServerMessage): message is LiveErrorMessage {
-  return "message_type" in message && message.message_type === "error";
-}
-
-function isMissingLiveStateError(error: string) {
-  return /^live state for match [0-9a-f-]+ not found$/i.test(error.trim());
-}
-
-function isTerminalSnapshot(snapshot: LiveMatchSnapshot | null | undefined) {
-  return snapshot?.status === "finished" || snapshot?.status === "aborted";
-}
-
-function reduceEvent(current: ConfirmedLiveState | null, event: LiveProtocolEvent): ReduceResult {
-  if (event.event_type === "snapshot") {
-    if (current?.snapshot && event.seq <= current.snapshot.seq) {
-      return { kind: "noop", state: current };
-    }
-    return {
-      kind: "next",
-      state: {
-        snapshot: event,
-        timeline: [frameFromSnapshot(event)]
-      }
-    };
-  }
-
-  if (!current?.snapshot) {
-    return { kind: "gap" };
-  }
-  if (event.seq < current.snapshot.seq) {
-    return { kind: "noop", state: current };
-  }
-  if (event.seq === current.snapshot.seq) {
-    return { kind: "noop", state: current };
-  }
-  if (event.seq > current.snapshot.seq + 1) {
-    return { kind: "gap" };
-  }
-
-  const nextSnapshot = snapshotFromEvent(current.snapshot, event);
-  const nextFrame = frameFromSnapshot(nextSnapshot);
-  if (event.event_type === "clock_sync") {
-    const lastFrame = current.timeline.at(-1);
-    const timeline =
-      lastFrame && lastFrame.moves.length === nextFrame.moves.length
-        ? [...current.timeline.slice(0, -1), nextFrame]
-        : [...current.timeline, nextFrame];
-    return { kind: "next", state: { snapshot: nextSnapshot, timeline } };
-  }
-
-  return {
-    kind: "next",
-    state: {
-      snapshot: nextSnapshot,
-      timeline: [...current.timeline, nextFrame]
-    }
-  };
-}
-
 export function useConfirmedLiveMatch(matchId: string) {
   const [state, setState] = useState<ConfirmedLiveState | null>(null);
   const [error, setError] = useState("");

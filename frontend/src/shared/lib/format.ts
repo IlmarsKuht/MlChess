@@ -1,4 +1,4 @@
-import type { GameResult, GameTermination, TimeControl, TournamentKind, Variant } from "../../app/types";
+import type { GameResult, GameTermination, TimeControl, TournamentKind, Variant } from "../api/types";
 
 export function formatVariant(value: Variant) {
   return value === "standard" ? "Standard" : "Chess960";

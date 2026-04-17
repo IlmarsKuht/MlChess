@@ -1,6 +1,6 @@
 import { Chess } from "chess.js";
 
-import type { BoardMoveMarker, ReplayPayload, Variant } from "../../app/types";
+import type { BoardMoveMarker, ReplayPayload, Variant } from "../api/types";
 
 export function buildFrames(variant: Variant, startFen: string, movesUci: string[]) {
   if (variant !== "standard") {

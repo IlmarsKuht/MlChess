@@ -1,3 +1,5 @@
+pub(crate) mod stream_bootstrap;
+
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,

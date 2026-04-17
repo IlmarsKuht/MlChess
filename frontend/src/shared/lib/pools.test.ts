@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { BenchmarkPool } from "../../app/types";
+import type { BenchmarkPool } from "../api/types";
 import { findPoolForChoices, timeControlKey, uniquePoolTimeControls, uniquePoolVariants } from "./pools";
 
 const pools: BenchmarkPool[] = [
